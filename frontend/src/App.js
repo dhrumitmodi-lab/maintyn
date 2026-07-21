@@ -16,6 +16,7 @@ import Expenses from "@/pages/Expenses";
 import Complaints from "@/pages/Complaints";
 import Announcements from "@/pages/Announcements";
 import Visitors from "@/pages/Visitors";
+import Amenities from "@/pages/Amenities";
 import "@/App.css";
 
 function Protected({ children, roles }) {
@@ -54,6 +55,7 @@ function App() {
                         <Route path="complaints" element={<Complaints />} />
                         <Route path="announcements" element={<Announcements />} />
                         <Route path="visitors" element={<Visitors />} />
+                        <Route path="amenities" element={<Amenities />} />
                     </Route>
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

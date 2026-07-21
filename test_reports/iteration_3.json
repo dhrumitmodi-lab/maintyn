@@ -1,0 +1,60 @@
+{
+  "summary": "Tested amenity + booking module end-to-end. All 16 backend tests pass (CRUD, slot listing, booking creation, conflict/past/hours/order validation, resident-vs-staff visibility, cancellation authorization, delete-amenity-cascade-cancel, stats, confirmation & cancellation emails). Frontend Amenities page /app/amenities loads, admin can add amenities, book slots (16 slots rendered for a 06:00–22:00 hourly amenity), My bookings tab lists the booking, cancel-booking-* works with 'Cancelled' toast, and All bookings tab is visible to staff. Dashboard now includes 'Bookings today' (with upcoming hint) for admin and 'My upcoming bookings' for residents.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "GET /api/stats", "issue": "my_upcoming_bookings is only returned when the resident has flat_id set. A resident without a flat gets no booking stat. Consider returning my_upcoming_bookings independently of flat linkage."}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard", "issues": ["'Amenities active' is only shown as sub-hint of the bookings card; no dedicated stat card. Non-blocking."]},
+      {"screen": "Book dialog", "issues": ["No aria-describedby on DialogContent (existing a11y warning across app, non-blocking)."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_amenities_bookings.py",
+    "/app/test_reports/pytest/amenities_results.xml"
+  ],
+  "action_items": [
+    "Optional: expose my_upcoming_bookings in /api/stats for residents even when flat_id is missing.",
+    "Optional: add a dedicated 'Amenities active' StatCard on the admin dashboard for clarity."
+  ],
+  "critical_code_review_comments": [
+    "Backend send_email_raw for booking events runs via BackgroundTasks — good. Cancellation emails go to booking user_email captured at creation time; correct behavior when a resident changes email later would still notify old address (edge case).",
+    "delete_amenity cascade uses status update_many but does NOT emit cancellation emails to affected users — cancel via API triggers email, but bulk cancel-on-amenity-delete is silent. Consider notifying users when their future booking is cancelled due to amenity removal.",
+    "_has_conflict is O(bookings_of_day) with a Python loop — fine for small counts, but consider a Mongo query using minutes-since-midnight fields for large volumes.",
+    "Amenities.jsx is 414 lines but manageable; slot grid uses `s.booked` for disabled but no visual hint of which user booked it (booking info is fetched but not displayed).",
+    "Frontend uses window.confirm for delete/cancel; consider Shadcn AlertDialog for consistency with rest of app."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_amenities_bookings.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% (all data-testids resolve; book/cancel flow works)"},
+  "test_credentials": "admin@maintyn.app / Admin@12345",
+  "seed_data_creation": "Test amenities named 'TEST Clubhouse <ts>' created & deleted by fixtures; residents test_res_<ts>@example.com and test_res2_<ts>@example.com registered (kept, minimal). Note: external Resend proxy rejects example.com so booking-emails to those residents 422 at the provider (backend logs a WARNING). Admin bookings emit real Resend 202s.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend tests are self-contained. Fresh resident users are created per module and given the first available flat via admin PATCH so /stats.my_upcoming_bookings returns. To verify booking emails, use admin@maintyn.app since resend rejects example.com. UITest amenity created during UI test was cleaned up mid-run (delete-amenity works).",
+  "verified_features": [
+    "GET /api/amenities admin sees active+inactive; resident sees only active",
+    "POST /api/amenities creates with slot_duration_minutes / price_per_slot",
+    "PATCH /api/amenities updates fields",
+    "DELETE /api/amenities cancels future bookings (verified via re-list)",
+    "GET /api/amenities/{id}/slots?date=... returns 16 hourly slots for 06:00-22:00 with 60min duration",
+    "POST /api/bookings success (200) sets user_email/amenity_name/price, marks slot booked",
+    "POST /api/bookings overlap → 409 'That slot is already booked'",
+    "POST /api/bookings past date → 400",
+    "POST /api/bookings outside hours → 400",
+    "POST /api/bookings start>=end → 400",
+    "GET /api/bookings — resident only own; admin sees all",
+    "POST /api/bookings/{id}/cancel — resident cannot cancel another user (403); admin can (200)",
+    "Confirmation + Cancellation email logs present for admin bookings ('Email sent to admin@maintyn.app: Booking confirmed/cancelled: TEST Clubhouse …')",
+    "GET /api/stats admin has bookings_today, bookings_upcoming, amenities_active; resident (with flat) also gets my_upcoming_bookings",
+    "Frontend nav-amenities visible; /app/amenities loads with tab-browse/tab-mybookings/tab-all-bookings",
+    "add-amenity-btn + dialog with amenity-name-input, amenity-active-switch, amenity-submit-btn works",
+    "book-amenity-{id} opens dialog with booking-calendar and slot-<HH:MM> buttons (16 slots for hourly Clubhouse)",
+    "booking-submit-btn creates booking, dialog closes, entry appears in My bookings",
+    "cancel-booking-{id} cancels booking, toast 'Cancelled' appears, row shows CANCELLED",
+    "Dashboard shows 'Bookings today' with '<n> upcoming' hint (admin) / 'My upcoming bookings' (resident)"
+  ]
+}

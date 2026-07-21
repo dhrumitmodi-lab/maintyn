@@ -50,13 +50,15 @@ export default function Dashboard() {
                     <StatCard label="Open Complaints" value={stats?.complaints_open ?? "—"} hint={`${stats?.complaints_inprogress ?? 0} in progress`} />
                     <StatCard label="Resolved" value={stats?.complaints_resolved ?? "—"} hint="All time" />
                     <StatCard label="Active Visitors" value={stats?.active_visitors ?? "—"} hint="On premises" />
+                    <StatCard label="Bookings today" value={stats?.bookings_today ?? "—"} hint={`${stats?.bookings_upcoming ?? 0} upcoming`} />
                     <StatCard label="Notices" value={stats?.announcements_count ?? "—"} hint="Published" />
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                     <StatCard label="My unpaid invoices" value={stats?.my_unpaid_count ?? "—"} accent />
                     <StatCard label="Amount pending" value={inr(stats?.my_pending_amount)} />
                     <StatCard label="Open complaints" value={complaints.filter(c => c.status !== "resolved").length} />
+                    <StatCard label="My upcoming bookings" value={stats?.my_upcoming_bookings ?? "—"} hint={`${stats?.amenities_active ?? 0} amenities`} />
                 </div>
             )}
 

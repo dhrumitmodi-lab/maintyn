@@ -260,6 +260,24 @@ class VisitorIn(BaseModel):
     flat_id: str
     vehicle_no: Optional[str] = None
 
+class AmenityIn(BaseModel):
+    name: str
+    description: Optional[str] = None
+    capacity: Optional[int] = None
+    open_time: str = "06:00"   # HH:MM 24h
+    close_time: str = "22:00"
+    slot_duration_minutes: int = 60
+    price_per_slot: float = 0
+    is_active: bool = True
+    image_url: Optional[str] = None
+
+class BookingIn(BaseModel):
+    amenity_id: str
+    date: str          # YYYY-MM-DD
+    start_time: str    # HH:MM
+    end_time: str      # HH:MM
+    notes: Optional[str] = None
+
 # ---------- Helpers ----------
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -826,6 +844,194 @@ async def checkout_visitor(vid: str, _: dict = Depends(get_current_user)):
         raise HTTPException(404, "Visitor not found")
     return doc
 
+# ---------- Amenities & Bookings ----------
+def _parse_hm(hm: str) -> int:
+    """Return minutes since 00:00 for HH:MM"""
+    h, m = hm.split(":")
+    return int(h) * 60 + int(m)
+
+async def _has_conflict(amenity_id: str, date: str, start_m: int, end_m: int, exclude_id: Optional[str] = None) -> bool:
+    q = {"amenity_id": amenity_id, "date": date, "status": {"$ne": "cancelled"}}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    async for b in db.bookings.find(q):
+        b_start = _parse_hm(b["start_time"])
+        b_end = _parse_hm(b["end_time"])
+        # overlap if start < b_end AND end > b_start
+        if start_m < b_end and end_m > b_start:
+            return True
+    return False
+
+@api.get("/amenities")
+async def list_amenities(user: dict = Depends(get_current_user)):
+    q = {} if user["role"] in ("admin", "committee") else {"is_active": True}
+    docs = await db.amenities.find(q, {"_id": 0}).sort("name", 1).to_list(200)
+    return docs
+
+@api.post("/amenities")
+async def create_amenity(data: AmenityIn, _: dict = Depends(require_staff)):
+    a = {"id": new_id(), **data.model_dump(), "created_at": now_iso()}
+    await db.amenities.insert_one(a)
+    a.pop("_id", None)
+    return a
+
+@api.patch("/amenities/{aid}")
+async def update_amenity(aid: str, data: AmenityIn, _: dict = Depends(require_staff)):
+    await db.amenities.update_one({"id": aid}, {"$set": data.model_dump()})
+    doc = await db.amenities.find_one({"id": aid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Amenity not found")
+    return doc
+
+@api.delete("/amenities/{aid}")
+async def delete_amenity(aid: str, _: dict = Depends(require_admin)):
+    res = await db.amenities.delete_one({"id": aid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Amenity not found")
+    # cancel future bookings for this amenity
+    today = datetime.now(timezone.utc).date().isoformat()
+    await db.bookings.update_many(
+        {"amenity_id": aid, "date": {"$gte": today}, "status": {"$ne": "cancelled"}},
+        {"$set": {"status": "cancelled", "cancelled_at": now_iso(), "cancel_reason": "Amenity removed"}}
+    )
+    return {"ok": True}
+
+@api.get("/amenities/{aid}/slots")
+async def amenity_slots(aid: str, date: str, _: dict = Depends(get_current_user)):
+    """Return time slots for a given date with availability status."""
+    amenity = await db.amenities.find_one({"id": aid})
+    if not amenity:
+        raise HTTPException(404, "Amenity not found")
+    open_m = _parse_hm(amenity["open_time"])
+    close_m = _parse_hm(amenity["close_time"])
+    dur = int(amenity.get("slot_duration_minutes", 60))
+    # Load existing bookings for that day
+    existing = await db.bookings.find(
+        {"amenity_id": aid, "date": date, "status": {"$ne": "cancelled"}},
+        {"_id": 0}
+    ).to_list(500)
+    booked_ranges = [(_parse_hm(b["start_time"]), _parse_hm(b["end_time"]), b) for b in existing]
+
+    slots = []
+    cur = open_m
+    while cur + dur <= close_m:
+        s, e = cur, cur + dur
+        booking = None
+        for bs, be, b in booked_ranges:
+            if s < be and e > bs:
+                booking = {"id": b["id"], "user_name": b.get("user_name"), "flat_label": b.get("flat_label")}
+                break
+        slots.append({
+            "start_time": f"{s // 60:02d}:{s % 60:02d}",
+            "end_time":   f"{e // 60:02d}:{e % 60:02d}",
+            "booked": booking is not None,
+            "booking": booking,
+        })
+        cur += dur
+    amenity.pop("_id", None)
+    return {"amenity": amenity, "date": date, "slots": slots}
+
+@api.get("/bookings")
+async def list_bookings(user: dict = Depends(get_current_user), scope: str = Query("all")):
+    q = {}
+    if user["role"] == "resident":
+        q["user_id"] = user["id"]
+    if scope == "upcoming":
+        q["date"] = {"$gte": datetime.now(timezone.utc).date().isoformat()}
+        q["status"] = {"$ne": "cancelled"}
+    docs = await db.bookings.find(q, {"_id": 0}).sort([("date", -1), ("start_time", -1)]).to_list(500)
+    for d in docs:
+        a = await db.amenities.find_one({"id": d["amenity_id"]}, {"_id": 0})
+        d["amenity"] = a
+    return docs
+
+@api.post("/bookings")
+async def create_booking(data: BookingIn, background: BackgroundTasks, user: dict = Depends(get_current_user)):
+    amenity = await db.amenities.find_one({"id": data.amenity_id})
+    if not amenity or not amenity.get("is_active", True):
+        raise HTTPException(404, "Amenity not available")
+    try:
+        s = _parse_hm(data.start_time)
+        e = _parse_hm(data.end_time)
+    except Exception:
+        raise HTTPException(400, "Invalid time format (HH:MM)")
+    if e <= s:
+        raise HTTPException(400, "End time must be after start time")
+    open_m = _parse_hm(amenity["open_time"])
+    close_m = _parse_hm(amenity["close_time"])
+    if s < open_m or e > close_m:
+        raise HTTPException(400, f"Slot outside amenity hours ({amenity['open_time']} – {amenity['close_time']})")
+    # No past-date bookings
+    today = datetime.now(timezone.utc).date().isoformat()
+    if data.date < today:
+        raise HTTPException(400, "Cannot book in the past")
+    if await _has_conflict(data.amenity_id, data.date, s, e):
+        raise HTTPException(409, "That slot is already booked")
+
+    flat = None
+    if user.get("flat_id"):
+        flat = await db.flats.find_one({"id": user["flat_id"]}, {"_id": 0})
+    flat_label = f"{flat['block']}-{flat['number']}" if flat else None
+
+    b = {
+        "id": new_id(),
+        "amenity_id": data.amenity_id,
+        "amenity_name": amenity["name"],
+        "user_id": user["id"],
+        "user_name": user["name"],
+        "user_email": user["email"],
+        "flat_id": user.get("flat_id"),
+        "flat_label": flat_label,
+        "date": data.date,
+        "start_time": data.start_time,
+        "end_time": data.end_time,
+        "notes": data.notes,
+        "status": "confirmed",
+        "price": float(amenity.get("price_per_slot") or 0),
+        "created_at": now_iso(),
+        "cancelled_at": None,
+        "cancel_reason": None,
+    }
+    await db.bookings.insert_one(b)
+    b.pop("_id", None)
+
+    # Email confirmation to booking user
+    body = (
+        f"<p>Hi {user['name']},</p>"
+        f"<p>Your booking is <b>confirmed</b>.</p>"
+        f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;margin:12px 0'>"
+        f"<tr><td style='color:#576B61'>Amenity</td><td><b>{amenity['name']}</b></td></tr>"
+        f"<tr><td style='color:#576B61'>Date</td><td>{data.date}</td></tr>"
+        f"<tr><td style='color:#576B61'>Time</td><td>{data.start_time} – {data.end_time}</td></tr>"
+        + (f"<tr><td style='color:#576B61'>Price</td><td>₹{b['price']:,.0f}</td></tr>" if b["price"] > 0 else "")
+        + f"</table><p>See you there!</p>"
+    )
+    html = _email_frame("Booking confirmed", body, f"{FRONTEND_URL}/app/amenities", "View bookings")
+    background.add_task(send_email_raw, user["email"], f"Booking confirmed: {amenity['name']}", html)
+    return b
+
+@api.post("/bookings/{bid}/cancel")
+async def cancel_booking(bid: str, background: BackgroundTasks, user: dict = Depends(get_current_user)):
+    b = await db.bookings.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Booking not found")
+    if user["role"] == "resident" and b["user_id"] != user["id"]:
+        raise HTTPException(403, "Not your booking")
+    if b["status"] == "cancelled":
+        return {**{k: v for k, v in b.items() if k != "_id"}}
+    await db.bookings.update_one({"id": bid}, {"$set": {
+        "status": "cancelled",
+        "cancelled_at": now_iso(),
+        "cancelled_by": user["id"],
+    }})
+    doc = await db.bookings.find_one({"id": bid}, {"_id": 0})
+    body = (f"<p>Hi {b['user_name']},</p>"
+            f"<p>Your booking for <b>{b.get('amenity_name')}</b> on <b>{b['date']}</b> "
+            f"at {b['start_time']} – {b['end_time']} has been cancelled.</p>")
+    html = _email_frame("Booking cancelled", body, f"{FRONTEND_URL}/app/amenities", "View bookings")
+    background.add_task(send_email_raw, b["user_email"], f"Booking cancelled: {b.get('amenity_name')}", html)
+    return doc
+
 # ---------- Dashboard stats ----------
 @api.get("/stats")
 async def stats(user: dict = Depends(get_current_user)):
@@ -853,13 +1059,19 @@ async def stats(user: dict = Depends(get_current_user)):
     active_visitors = await db.visitors.count_documents({"check_out": None})
     announcements_count = await db.announcements.count_documents({})
 
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    bookings_today = await db.bookings.count_documents({"date": today_iso, "status": {"$ne": "cancelled"}})
+    bookings_upcoming = await db.bookings.count_documents({"date": {"$gt": today_iso}, "status": {"$ne": "cancelled"}})
+    amenities_active = await db.amenities.count_documents({"is_active": True})
+
     resident_data = {}
     if user["role"] == "resident" and user.get("flat_id"):
         my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
         my_pending_amount = 0.0
         async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}):
             my_pending_amount += float(inv["amount"])
-        resident_data = {"my_unpaid_count": my_unpaid, "my_pending_amount": my_pending_amount}
+        my_bookings = await db.bookings.count_documents({"user_id": user["id"], "date": {"$gte": today_iso}, "status": {"$ne": "cancelled"}})
+        resident_data = {"my_unpaid_count": my_unpaid, "my_pending_amount": my_pending_amount, "my_upcoming_bookings": my_bookings}
 
     return {
         "total_flats": total_flats,
@@ -875,6 +1087,9 @@ async def stats(user: dict = Depends(get_current_user)):
         "complaints_resolved": resolved_complaints,
         "active_visitors": active_visitors,
         "announcements_count": announcements_count,
+        "bookings_today": bookings_today,
+        "bookings_upcoming": bookings_upcoming,
+        "amenities_active": amenities_active,
         **resident_data,
     }
 
@@ -893,6 +1108,10 @@ async def startup():
     await db.files.create_index("id", unique=True)
     await db.password_reset_tokens.create_index("token", unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
+    await db.amenities.create_index("id", unique=True)
+    await db.bookings.create_index("id", unique=True)
+    await db.bookings.create_index([("amenity_id", 1), ("date", 1)])
+    await db.bookings.create_index("user_id")
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()

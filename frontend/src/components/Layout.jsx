@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
     House, Users as UsersIcon, Buildings, Receipt, CurrencyInr,
-    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List
+    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti
 } from "@phosphor-icons/react";
 import Logo from "@/components/Logo";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ const NAV = [
     { to: "/app/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "committee", "resident"], testId: "nav-invoices" },
     { to: "/app/expenses", label: "Expenses", icon: CurrencyInr, roles: ["admin", "committee", "resident"], testId: "nav-expenses" },
     { to: "/app/complaints", label: "Complaints", icon: ChatCircleDots, roles: ["admin", "committee", "resident"], testId: "nav-complaints" },
+    { to: "/app/amenities", label: "Amenities", icon: Confetti, roles: ["admin", "committee", "resident"], testId: "nav-amenities" },
     { to: "/app/announcements", label: "Notices", icon: Megaphone, roles: ["admin", "committee", "resident"], testId: "nav-announcements" },
     { to: "/app/visitors", label: "Visitors", icon: IdentificationBadge, roles: ["admin", "committee", "resident"], testId: "nav-visitors" },
 ];
