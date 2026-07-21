@@ -293,6 +293,17 @@ class ComplaintIn(BaseModel):
 class ComplaintUpdate(BaseModel):
     status: Optional[str] = None  # open, in_progress, resolved
     resolution_note: Optional[str] = None
+    assigned_to: Optional[str] = None  # staff id, or "" to unassign
+
+class StaffIn(BaseModel):
+    name: str = Field(min_length=1)
+    role_label: str = Field(min_length=1)  # e.g. "Plumber", "Lift technician"
+    category: str = "general"  # matches complaint categories: plumbing/electrical/security/cleanliness/parking/amenities/general/lift/other
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    vendor_org: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
 
 class AnnouncementIn(BaseModel):
     title: str
@@ -675,6 +686,8 @@ async def create_society(data: SocietyCreateIn, current: dict = Depends(require_
     await sdb.bookings.create_index("id", unique=True)
     await sdb.utility_connections.create_index("id", unique=True)
     await sdb.utility_bills.create_index("id", unique=True)
+    await sdb.staff.create_index("id", unique=True)
+    await sdb.staff.create_index("category")
     admin_user = {
         "id": new_id(), "email": email, "password_hash": hash_password(data.admin_password),
         "name": data.admin_name, "phone": data.admin_phone, "role": "admin",
@@ -1156,6 +1169,43 @@ async def _notify_invoice_created(flat_id: str, amount: float, description: str,
         html = _email_frame("New invoice raised", body, f"{FRONTEND_URL}/app/invoices", "View invoices")
         await send_email_raw(r["email"], subject, html)
 
+async def _notify_invoice_paid(invoice_id: str):
+    """Send payment receipt email to residents of the flat when an invoice is marked paid."""
+    inv = await db.invoices.find_one({"id": invoice_id})
+    if not inv:
+        return
+    residents = await db.users.find({"flat_id": inv["flat_id"]}, {"password_hash": 0}).to_list(50)
+    if not residents:
+        return
+    flat = await db.flats.find_one({"id": inv["flat_id"]})
+    flat_label = f"{flat['block']}-{flat['number']}" if flat else "your flat"
+    society_doc = await db.society.find_one({"id": SOCIETY_ID}) or {}
+    society_name = society_doc.get("name") or "Society"
+    paid_when = inv.get("paid_at", now_iso())
+    try:
+        paid_date_str = datetime.fromisoformat(paid_when.replace("Z", "+00:00")).strftime("%d %b %Y")
+    except Exception:
+        paid_date_str = paid_when[:10]
+    receipt_no = f"RCPT-{invoice_id[:8].upper()}"
+    subject = f"Payment receipt · {inv.get('description', 'Invoice')}"
+    for r in residents:
+        body = (
+            f"<p>Hi {r['name']},</p>"
+            f"<p>We've recorded your payment for <b>{flat_label}</b>. Thank you!</p>"
+            f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;margin:12px 0;width:100%'>"
+            f"<tr><td style='color:#576B61'>Receipt number</td><td><b>{receipt_no}</b></td></tr>"
+            f"<tr><td style='color:#576B61'>Description</td><td><b>{inv.get('description','')}</b></td></tr>"
+            f"<tr><td style='color:#576B61'>Amount paid</td><td><b>₹{float(inv.get('amount',0)):,.0f}</b></td></tr>"
+            f"<tr><td style='color:#576B61'>Month</td><td>{inv.get('month','')}</td></tr>"
+            f"<tr><td style='color:#576B61'>Payment method</td><td>{(inv.get('payment_method') or 'manual').replace('_',' ').title()}</td></tr>"
+            f"<tr><td style='color:#576B61'>Paid on</td><td>{paid_date_str}</td></tr>"
+            f"<tr><td style='color:#576B61'>Society</td><td>{society_name}</td></tr>"
+            f"</table>"
+            f"<p style='color:#576B61;font-size:12px'>Keep this email as your receipt. If anything looks wrong, reply to your society admin.</p>"
+        )
+        html = _email_frame("Payment received — receipt inside", body, f"{FRONTEND_URL}/app/invoices/{invoice_id}", "View invoice")
+        await send_email_raw(r["email"], subject, html)
+
 async def _notify_complaint_status(complaint: dict, new_status: str):
     if not complaint.get("created_by"):
         return
@@ -1231,12 +1281,13 @@ async def bulk_create_invoices(payload: dict, background: BackgroundTasks, user:
     return {"count": len(created)}
 
 @api.post("/invoices/{iid}/pay")
-async def mark_paid(iid: str, data: InvoicePay, user: dict = Depends(get_current_user)):
+async def mark_paid(iid: str, data: InvoicePay, background: BackgroundTasks, user: dict = Depends(get_current_user)):
     inv = await db.invoices.find_one({"id": iid})
     if not inv:
         raise HTTPException(404, "Invoice not found")
     if user["role"] == "resident" and inv["flat_id"] != user.get("flat_id"):
         raise HTTPException(403, "Not your invoice")
+    was_unpaid = inv.get("status") != "paid"
     await db.invoices.update_one({"id": iid}, {"$set": {
         "status": "paid",
         "paid_at": now_iso(),
@@ -1244,7 +1295,98 @@ async def mark_paid(iid: str, data: InvoicePay, user: dict = Depends(get_current
         "payment_note": data.note,
     }})
     doc = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    if was_unpaid:
+        background.add_task(_notify_invoice_paid, iid)
     return doc
+
+@api.get("/invoices/stats")
+async def invoice_stats(_: dict = Depends(require_staff)):
+    """Dashboard totals for invoices + defaulter list (unpaid >3 months old)."""
+    raised_agg = await db.invoices.aggregate([
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
+    ]).to_list(1)
+    paid_agg = await db.invoices.aggregate([
+        {"$match": {"status": "paid"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
+    ]).to_list(1)
+    unpaid_agg = await db.invoices.aggregate([
+        {"$match": {"status": "unpaid"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
+    ]).to_list(1)
+
+    raised_total = float(raised_agg[0]["total"]) if raised_agg else 0.0
+    raised_count = int(raised_agg[0]["count"]) if raised_agg else 0
+    received_total = float(paid_agg[0]["total"]) if paid_agg else 0.0
+    received_count = int(paid_agg[0]["count"]) if paid_agg else 0
+    pending_total = float(unpaid_agg[0]["total"]) if unpaid_agg else 0.0
+    pending_count = int(unpaid_agg[0]["count"]) if unpaid_agg else 0
+
+    collection_pct = int(round((received_total / raised_total) * 100)) if raised_total else 0
+
+    # Defaulters: flats with unpaid invoices where the OLDEST unpaid is >3 months old
+    threshold_iso = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+    per_flat = await db.invoices.aggregate([
+        {"$match": {"status": "unpaid"}},
+        {"$group": {
+            "_id": "$flat_id",
+            "unpaid_count": {"$sum": 1},
+            "amount": {"$sum": "$amount"},
+            "oldest": {"$min": "$created_at"},
+        }},
+        {"$match": {"oldest": {"$lte": threshold_iso}}},
+        {"$sort": {"amount": -1}},
+    ]).to_list(500)
+
+    flat_ids = [p["_id"] for p in per_flat if p.get("_id")]
+    flats_map = await _flat_map(flat_ids)
+    residents_by_flat = {}
+    if flat_ids:
+        async for r in db.users.find({"flat_id": {"$in": flat_ids}}, {"password_hash": 0, "_id": 0}):
+            residents_by_flat.setdefault(r["flat_id"], []).append(
+                {"id": r["id"], "name": r["name"], "email": r["email"], "phone": r.get("phone")}
+            )
+
+    now_utc = datetime.now(timezone.utc)
+    defaulters = []
+    for p in per_flat:
+        flat = flats_map.get(p["_id"])
+        if not flat:
+            continue
+        try:
+            oldest_dt = datetime.fromisoformat(p["oldest"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        months_pending = max(1, int((now_utc - oldest_dt).days // 30))
+        defaulters.append({
+            "flat_id": p["_id"],
+            "flat_label": f"{flat['block']}-{flat['number']}",
+            "unpaid_count": int(p["unpaid_count"]),
+            "amount": float(p["amount"]),
+            "oldest": p["oldest"],
+            "months_pending": months_pending,
+            "residents": residents_by_flat.get(p["_id"], []),
+        })
+
+    # Monthly trend (raised vs received) for last 6 months by invoice month field
+    trend_agg = await db.invoices.aggregate([
+        {"$group": {
+            "_id": "$month",
+            "raised": {"$sum": "$amount"},
+            "received": {"$sum": {"$cond": [{"$eq": ["$status", "paid"]}, "$amount", 0]}},
+        }},
+        {"$sort": {"_id": -1}},
+        {"$limit": 6},
+    ]).to_list(6)
+    trend = [{"month": t["_id"], "raised": float(t["raised"]), "received": float(t["received"])} for t in reversed(trend_agg)]
+
+    return {
+        "raised": {"total": raised_total, "count": raised_count},
+        "received": {"total": received_total, "count": received_count},
+        "pending": {"total": pending_total, "count": pending_count},
+        "collection_pct": collection_pct,
+        "defaulters": defaulters,
+        "trend": trend,
+    }
 
 @api.delete("/invoices/{iid}")
 async def delete_invoice(iid: str, _: dict = Depends(require_staff)):
@@ -1316,6 +1458,82 @@ async def create_expense(data: ExpenseIn, user: dict = Depends(require_staff)):
     exp.pop("_id", None)
     return exp
 
+@api.get("/expenses/stats")
+async def expense_stats(_: dict = Depends(require_staff)):
+    """Income (paid invoices) vs Spent (expenses) monthly for last 12 months + next-3-months projection."""
+    # We slice by 'month' field for income and 'date' first 7 chars for expenses.
+    # Build the last 12 month keys (YYYY-MM) including current month.
+    today = _date.today()
+    keys = []
+    y, m = today.year, today.month
+    for _ in range(12):
+        keys.append(f"{y:04d}-{m:02d}")
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    keys.reverse()  # oldest to newest
+    key_set = set(keys)
+
+    # Income by invoice month (only paid, grouped by month)
+    income_agg = await db.invoices.aggregate([
+        {"$match": {"status": "paid", "month": {"$in": list(key_set)}}},
+        {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}
+    ]).to_list(50)
+    income_map = {r["_id"]: float(r["total"]) for r in income_agg}
+
+    # Spent by expense date (substring 0..7 = YYYY-MM)
+    spent_agg = await db.expenses.aggregate([
+        {"$group": {"_id": {"$substr": ["$date", 0, 7]}, "total": {"$sum": "$amount"}}}
+    ]).to_list(200)
+    spent_map = {r["_id"]: float(r["total"]) for r in spent_agg if r["_id"] in key_set}
+
+    series = [
+        {"month": k, "income": round(income_map.get(k, 0.0), 2), "spent": round(spent_map.get(k, 0.0), 2)}
+        for k in keys
+    ]
+
+    # Simple projection: average income & spent of last 3 non-zero months (fallback all-months avg)
+    last3 = series[-3:]
+    def _avg(vals):
+        vals = [v for v in vals if v > 0]
+        return sum(vals) / len(vals) if vals else 0.0
+    proj_income = _avg([s["income"] for s in last3])
+    proj_spent = _avg([s["spent"] for s in last3])
+
+    # Next 3 month keys
+    ny, nm = today.year, today.month
+    proj_keys = []
+    for _ in range(3):
+        nm += 1
+        if nm == 13:
+            nm = 1
+            ny += 1
+        proj_keys.append(f"{ny:04d}-{nm:02d}")
+
+    projection = [{"month": k, "income": round(proj_income, 2), "spent": round(proj_spent, 2)} for k in proj_keys]
+
+    total_income = sum(s["income"] for s in series)
+    total_spent = sum(s["spent"] for s in series)
+    net = round(total_income - total_spent, 2)
+
+    # Category breakdown of expenses (this window)
+    cat_agg = await db.expenses.aggregate([
+        {"$match": {"date": {"$gte": keys[0] + "-01"}}},
+        {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
+        {"$sort": {"total": -1}}
+    ]).to_list(20)
+    categories = [{"category": r["_id"] or "other", "total": float(r["total"])} for r in cat_agg]
+
+    return {
+        "window": {"from": keys[0], "to": keys[-1]},
+        "series": series,
+        "projection": projection,
+        "totals": {"income": round(total_income, 2), "spent": round(total_spent, 2), "net": net},
+        "avg": {"income": round(proj_income, 2), "spent": round(proj_spent, 2)},
+        "categories": categories,
+    }
+
 @api.delete("/expenses/{eid}")
 async def delete_expense(eid: str, _: dict = Depends(require_staff)):
     res = await db.expenses.delete_one({"id": eid})
@@ -1328,10 +1546,30 @@ async def delete_expense(eid: str, _: dict = Depends(require_staff)):
 async def list_complaints(user: dict = Depends(get_current_user)):
     query = {} if user["role"] in ("admin", "committee") else {"created_by": user["id"]}
     docs = await db.complaints.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    # Enrich with staff details
+    staff_ids = list({d["assigned_to"] for d in docs if d.get("assigned_to")})
+    staff_map = {}
+    if staff_ids:
+        async for s in db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0}):
+            staff_map[s["id"]] = {
+                "id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
+                "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org"),
+            }
+    for d in docs:
+        if d.get("assigned_to"):
+            d["assigned_staff"] = staff_map.get(d["assigned_to"])
     return docs
+
+async def _auto_assign_staff(category: str) -> Optional[str]:
+    """Find first active staff matching this category. Returns staff id or None."""
+    s = await db.staff.find_one({"category": category, "is_active": True})
+    if s:
+        return s["id"]
+    return None
 
 @api.post("/complaints")
 async def create_complaint(data: ComplaintIn, user: dict = Depends(get_current_user)):
+    assigned = await _auto_assign_staff(data.category)
     c = {
         "id": new_id(),
         **data.model_dump(),
@@ -1342,10 +1580,17 @@ async def create_complaint(data: ComplaintIn, user: dict = Depends(get_current_u
         "resolution_note": None,
         "resolved_by": None,
         "resolved_at": None,
+        "assigned_to": assigned,
+        "assigned_at": now_iso() if assigned else None,
         "created_at": now_iso(),
     }
     await db.complaints.insert_one(c)
     c.pop("_id", None)
+    if assigned:
+        s = await db.staff.find_one({"id": assigned}, {"_id": 0})
+        if s:
+            c["assigned_staff"] = {"id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
+                                     "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org")}
     return c
 
 @api.patch("/complaints/{cid}")
@@ -1353,15 +1598,71 @@ async def update_complaint(cid: str, data: ComplaintUpdate, background: Backgrou
     existing = await db.complaints.find_one({"id": cid})
     if not existing:
         raise HTTPException(404, "Complaint not found")
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    payload = data.model_dump(exclude_unset=True)
+    upd = {}
+    for k, v in payload.items():
+        if k == "assigned_to":
+            # empty string clears assignment; validate exists otherwise
+            if v is None or v == "":
+                upd["assigned_to"] = None
+                upd["assigned_at"] = None
+            else:
+                s = await db.staff.find_one({"id": v})
+                if not s:
+                    raise HTTPException(400, "Staff not found")
+                upd["assigned_to"] = v
+                upd["assigned_at"] = now_iso()
+        elif v is not None:
+            upd[k] = v
     if upd.get("status") == "resolved":
         upd["resolved_by"] = user["id"]
         upd["resolved_at"] = now_iso()
+    if not upd:
+        raise HTTPException(400, "No changes")
     await db.complaints.update_one({"id": cid}, {"$set": upd})
     doc = await db.complaints.find_one({"id": cid}, {"_id": 0})
+    if doc.get("assigned_to"):
+        s = await db.staff.find_one({"id": doc["assigned_to"]}, {"_id": 0})
+        if s:
+            doc["assigned_staff"] = {"id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
+                                       "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org")}
     if upd.get("status") and upd["status"] != existing.get("status"):
         background.add_task(_notify_complaint_status, doc, upd["status"])
     return doc
+
+# ---------- Staff / Vendors ----------
+@api.get("/staff")
+async def list_staff(user: dict = Depends(get_current_user), category: Optional[str] = None, active: Optional[bool] = None):
+    q = {}
+    if category:
+        q["category"] = category
+    if active is not None:
+        q["is_active"] = active
+    docs = await db.staff.find(q, {"_id": 0}).sort([("category", 1), ("name", 1)]).to_list(500)
+    return docs
+
+@api.post("/staff")
+async def create_staff(data: StaffIn, _: dict = Depends(require_staff)):
+    s = {"id": new_id(), **data.model_dump(), "created_at": now_iso()}
+    await db.staff.insert_one(s)
+    s.pop("_id", None)
+    return s
+
+@api.patch("/staff/{sid}")
+async def update_staff(sid: str, data: StaffIn, _: dict = Depends(require_staff)):
+    res = await db.staff.update_one({"id": sid}, {"$set": {**data.model_dump(), "updated_at": now_iso()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Staff not found")
+    return await db.staff.find_one({"id": sid}, {"_id": 0})
+
+@api.delete("/staff/{sid}")
+async def delete_staff(sid: str, _: dict = Depends(require_staff)):
+    res = await db.staff.delete_one({"id": sid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Staff not found")
+    # Unassign complaints referring to this staff
+    await db.complaints.update_many({"assigned_to": sid}, {"$set": {"assigned_to": None, "assigned_at": None}})
+    return {"ok": True}
 
 # ---------- Announcements ----------
 @api.get("/announcements")
@@ -1965,6 +2266,7 @@ async def startup():
     await db.digest_runs.create_index("month", unique=True)
     await db.utility_connections.create_index("id", unique=True); await db.utility_connections.create_index("flat_id")
     await db.utility_bills.create_index("id", unique=True); await db.utility_bills.create_index("flat_id")
+    await db.staff.create_index("id", unique=True); await db.staff.create_index("category")
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()
     admin_pw = os.environ.get("ADMIN_PASSWORD", "Admin@12345")

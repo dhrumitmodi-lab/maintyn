@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from "react";
 import api, { formatError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, EmptyState, Chip } from "@/components/Shared";
+import { PageHeader, EmptyState, Chip, StatCard } from "@/components/Shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash, CheckCircle, Stack, Eye } from "@phosphor-icons/react";
+import { Plus, Trash, CheckCircle, Stack, Eye, WarningOctagon, TrendUp } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 
@@ -19,22 +19,26 @@ export default function Invoices() {
     const nav = useNavigate();
     const [invoices, setInvoices] = useState([]);
     const [flats, setFlats] = useState([]);
+    const [stats, setStats] = useState(null);
     const [open, setOpen] = useState(false);
     const [bulkOpen, setBulkOpen] = useState(false);
     const [filter, setFilter] = useState("all");
     const [form, setForm] = useState({ flat_id: "", amount: "", description: "", month: "", due_date: "" });
     const [bulkForm, setBulkForm] = useState({ amount: "", description: "", month: "", due_date: "" });
 
+    const isStaff = user?.role === "admin" || user?.role === "committee";
+
     async function load() {
         try {
-            const [i, f] = await Promise.all([api.get("/invoices"), api.get("/flats")]);
-            setInvoices(i.data);
-            setFlats(f.data);
+            const calls = [api.get("/invoices"), api.get("/flats")];
+            if (isStaff) calls.push(api.get("/invoices/stats"));
+            const results = await Promise.all(calls);
+            setInvoices(results[0].data);
+            setFlats(results[1].data);
+            if (isStaff) setStats(results[2].data);
         } catch (e) { toast.error(formatError(e)); }
     }
-    useEffect(() => { load(); }, []);
-
-    const isStaff = user?.role === "admin" || user?.role === "committee";
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
     async function submit(e) {
         e.preventDefault();
@@ -57,7 +61,7 @@ export default function Invoices() {
         } catch (e) { toast.error(formatError(e)); }
     }
     async function markPaid(inv) {
-        try { await api.post(`/invoices/${inv.id}/pay`, { method: "manual" }); toast.success("Marked paid"); load(); }
+        try { await api.post(`/invoices/${inv.id}/pay`, { method: "manual" }); toast.success("Marked paid · receipt emailed"); load(); }
         catch (e) { toast.error(formatError(e)); }
     }
     async function remove(inv) {
@@ -85,6 +89,85 @@ export default function Invoices() {
                     </div>
                 )}
             />
+
+            {isStaff && stats && (
+                <div data-testid="invoice-dashboard" className="mb-8 space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <StatCard label="Raised" value={inr(stats.raised.total)} hint={`${stats.raised.count} invoices`} />
+                        <StatCard label="Received" value={inr(stats.received.total)} hint={`${stats.received.count} paid · ${stats.collection_pct}% collection`} accent />
+                        <StatCard label="Pending" value={inr(stats.pending.total)} hint={`${stats.pending.count} unpaid`} />
+                        <StatCard label="Defaulters" value={stats.defaulters.length} hint="flats >3 months overdue" />
+                    </div>
+
+                    {stats.trend?.length > 0 && (
+                        <div className="bg-white border border-brand-line rounded-sm p-5">
+                            <div className="flex items-center gap-2 mb-4">
+                                <TrendUp size={16} className="text-brand-action" weight="duotone" />
+                                <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">Monthly trend · raised vs received</p>
+                            </div>
+                            <div className="flex items-end gap-2 h-32">
+                                {stats.trend.map((t, i) => {
+                                    const max = Math.max(...stats.trend.map(x => x.raised), 1);
+                                    const rHeight = (t.raised / max) * 100;
+                                    const pHeight = (t.received / max) * 100;
+                                    return (
+                                        <div key={i} className="flex-1 flex flex-col items-center gap-1" data-testid={`invoice-trend-${t.month}`}>
+                                            <div className="w-full flex items-end gap-1 flex-1">
+                                                <div className="flex-1 bg-brand-line rounded-t-sm relative group" style={{ height: `${rHeight}%` }}>
+                                                    <span className="opacity-0 group-hover:opacity-100 absolute -top-5 left-0 text-[10px] text-brand-inkSoft whitespace-nowrap">{inr(t.raised)}</span>
+                                                </div>
+                                                <div className="flex-1 bg-brand-action rounded-t-sm relative group" style={{ height: `${pHeight}%` }}>
+                                                    <span className="opacity-0 group-hover:opacity-100 absolute -top-5 left-0 text-[10px] text-brand-action whitespace-nowrap">{inr(t.received)}</span>
+                                                </div>
+                                            </div>
+                                            <p className="text-[10px] text-brand-inkSoft">{t.month}</p>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div className="flex gap-4 mt-3 text-[10px] uppercase tracking-overline text-brand-inkSoft">
+                                <span className="flex items-center gap-1.5"><span className="w-3 h-3 bg-brand-line rounded-sm"></span> Raised</span>
+                                <span className="flex items-center gap-1.5"><span className="w-3 h-3 bg-brand-action rounded-sm"></span> Received</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {stats.defaulters.length > 0 && (
+                        <div className="bg-white border border-brand-line rounded-sm p-5" data-testid="invoice-defaulters">
+                            <div className="flex items-center gap-2 mb-4">
+                                <WarningOctagon size={18} className="text-brand-action" weight="duotone" />
+                                <h3 className="font-heading text-lg text-brand-ink tracking-tight">Defaulters ({stats.defaulters.length})</h3>
+                                <span className="text-xs text-brand-inkSoft">flats with unpaid invoices &gt; 3 months old</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead>
+                                        <tr className="bg-brand-bg border-b border-brand-line text-left">
+                                            {["Flat", "Residents", "Unpaid", "Months pending", "Total due"].map(h => (
+                                                <th key={h} className="py-2 px-3 font-medium text-brand-inkSoft text-[10px] uppercase tracking-overline">{h}</th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {stats.defaulters.map(d => (
+                                            <tr key={d.flat_id} data-testid={`defaulter-${d.flat_id}`} className="border-b border-brand-line/60">
+                                                <td className="py-2 px-3 font-medium text-brand-ink">{d.flat_label}</td>
+                                                <td className="py-2 px-3 text-brand-inkSoft">
+                                                    {d.residents.length === 0 ? <span className="italic">— no resident linked</span> :
+                                                        d.residents.map(r => r.name).join(", ")}
+                                                </td>
+                                                <td className="py-2 px-3 text-brand-inkSoft">{d.unpaid_count}</td>
+                                                <td className="py-2 px-3"><Chip variant="danger">{d.months_pending}mo</Chip></td>
+                                                <td className="py-2 px-3 font-heading text-brand-ink">{inr(d.amount)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             <div className="flex gap-2 mb-4">
                 {["all", "unpaid", "paid"].map(f => (

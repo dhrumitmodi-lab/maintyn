@@ -1,0 +1,36 @@
+{
+  "summary": "M-416 feature batch tested end-to-end: Staff/Vendor directory CRUD, auto-assign on complaint create (+ manual reassign + clear), payment receipt email on invoice mark_paid, invoice stats + defaulters, expense stats + projection, and multi-tenant isolation. Backend: 17/17 pytest passing. Frontend: admin can add staff, complaint cards show assign + status selects, invoice + expense dashboards render, resident sees auto-assigned staff panel with name/phone.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dialog components (New complaint, Add staff)", "issues": ["Radix Dialog missing DialogDescription/aria-describedby (a11y warning in console) — non-blocking"]},
+      {"screen": "Resident /app/complaints", "issues": ["React dev-only 'ResizeObserver loop completed with undelivered notifications' overlay flashes briefly after list re-render; benign but noisy in dev overlay. Consider window-level handler to swallow it."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_staff_and_dashboards.py",
+    "/app/test_reports/pytest/iter10_staff.xml"
+  ],
+  "action_items": [
+    "Optional: add DialogDescription to shadcn Dialog usages to silence a11y warnings",
+    "Optional: swallow ResizeObserver-loop error at window.onerror to hide the dev overlay flash"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 2313 lines — consider splitting into modules (staff.py, invoices.py, complaints.py, expenses.py) using APIRouter for maintainability.",
+    "_auto_assign_staff picks the first matching active staff by insertion order (no explicit sort). Consider a deterministic tie-breaker (least-loaded, or oldest-created) for predictable auto-assign under multiple staff per category.",
+    "invoice_stats does not gate defaulter list threshold by 'due_date' — uses created_at + 90d. If due_date is later than created_at, business-defined '>3 months overdue' semantics may want to use due_date instead.",
+    "expense_stats projection uses average of last-3-months non-zero values only — a month with zero income/spent skews the projection upward. Confirm this is intended.",
+    "PATCH /api/staff/{sid} uses StaffIn (all fields required) — cannot patch a single field without resending others. Should accept a partial model with exclude_unset.",
+    "delete_staff unassigns complaints — no notification to admin/committee that reassignment is needed. Nice-to-have."
+  ],
+  "updated_files": ["/app/backend/tests/test_staff_and_dashboards.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@maintyn.app/Admin@12345, demo.resident@example.com/Resident@123, master@maintyn.in/Master@12345",
+  "seed_data_creation": "Created several TEST_-prefixed staff and one TEST_ invoice + UI_ complaint in Default society, plus a new TEST_Soc_* society via master console for isolation test. Cleanup not performed — safe TEST_ prefixed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "M-416 batch (Staff/Vendors, auto-assign, receipt, invoice/expense dashboards, multi-tenant isolation) fully verified. Backend pytest suite: /app/backend/tests/test_staff_and_dashboards.py. Frontend covered via Playwright for admin + resident flows.",
+  "rca of the issue": "N/A — no defects blocking; only optional enhancements."
+}

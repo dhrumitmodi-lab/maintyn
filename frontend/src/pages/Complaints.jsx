@@ -8,20 +8,26 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, CheckCircle, Clock, Warning, Bell } from "@phosphor-icons/react";
+import { Plus, CheckCircle, Clock, Warning, Bell, Wrench, Phone, EnvelopeSimple, UserGear } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 const CATS = ["plumbing", "electrical", "security", "cleanliness", "parking", "amenities", "general"];
 const STATUSES = ["open", "in_progress", "resolved"];
+const UNASSIGNED = "__unassigned__";
 
 export default function Complaints() {
     const { user } = useAuth();
     const [complaints, setComplaints] = useState([]);
+    const [staff, setStaff] = useState([]);
     const [open, setOpen] = useState(false);
     const [form, setForm] = useState({ title: "", description: "", category: "general" });
 
     async function load() {
-        try { const { data } = await api.get("/complaints"); setComplaints(data); }
+        try {
+            const [c, s] = await Promise.all([api.get("/complaints"), api.get("/staff")]);
+            setComplaints(c.data);
+            setStaff(s.data);
+        }
         catch (e) { toast.error(formatError(e)); }
     }
     useEffect(() => { load(); }, []);
@@ -47,6 +53,14 @@ export default function Complaints() {
         } catch (e) { toast.error(formatError(e)); }
     }
 
+    async function reassign(c, staffId) {
+        try {
+            await api.patch(`/complaints/${c.id}`, { assigned_to: staffId === UNASSIGNED ? "" : staffId });
+            toast.success(staffId === UNASSIGNED ? "Unassigned" : "Reassigned");
+            load();
+        } catch (e) { toast.error(formatError(e)); }
+    }
+
     const grouped = {
         open: complaints.filter(c => c.status === "open"),
         in_progress: complaints.filter(c => c.status === "in_progress"),
@@ -60,7 +74,7 @@ export default function Complaints() {
             <PageHeader
                 overline="Support"
                 title="Complaints"
-                description={isStaff ? "Manage resident complaints. Update status as you resolve them." : "Raise issues about your flat or society and track resolution."}
+                description={isStaff ? "Manage resident complaints. New ones auto-route to staff by category — reassign anytime." : "Raise issues about your flat or society and track resolution."}
                 actions={
                     <Button data-testid="add-complaint-btn" onClick={() => setOpen(true)} className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white active:scale-[0.98]">
                         <Plus size={16} className="mr-1.5" /> New complaint
@@ -72,8 +86,8 @@ export default function Complaints() {
                 <div className="mb-6 bg-brand-sage/60 border border-brand-line rounded-sm p-4 flex items-start gap-3" data-testid="complaint-notify-banner">
                     <Bell size={20} weight="duotone" className="text-brand-action mt-0.5" />
                     <div>
-                        <p className="font-medium text-brand-ink">You'll be notified by email whenever your complaint status changes.</p>
-                        <p className="text-xs text-brand-inkSoft mt-1">Track live status on this board — your complaints move across columns as the committee works on them.</p>
+                        <p className="font-medium text-brand-ink">Your complaint auto-routes to the right person.</p>
+                        <p className="text-xs text-brand-inkSoft mt-1">You'll see assigned staff contact details on your complaint card and get email updates as it moves.</p>
                     </div>
                 </div>
             )}
@@ -104,13 +118,52 @@ export default function Complaints() {
                                         </div>
                                         <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft mt-1">{c.category}</p>
                                         <p className="text-xs text-brand-inkSoft mt-2 line-clamp-2">{c.description}</p>
-                                        <div className="flex items-center justify-between mt-3">
+
+                                        {/* Assigned staff */}
+                                        {c.assigned_staff ? (
+                                            <div className="mt-3 p-2 bg-brand-sage/40 border border-brand-line rounded-sm" data-testid={`complaint-assigned-${c.id}`}>
+                                                <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-overline text-brand-inkSoft mb-1">
+                                                    <Wrench size={11} weight="duotone" /> Assigned to
+                                                </div>
+                                                <p className="text-sm font-medium text-brand-ink leading-tight">{c.assigned_staff.name}</p>
+                                                <p className="text-[11px] text-brand-inkSoft">{c.assigned_staff.role_label}{c.assigned_staff.vendor_org ? ` · ${c.assigned_staff.vendor_org}` : ""}</p>
+                                                <div className="flex flex-wrap gap-2 mt-1.5">
+                                                    {c.assigned_staff.phone && (
+                                                        <a href={`tel:${c.assigned_staff.phone}`} className="text-[11px] text-brand-action hover:underline flex items-center gap-1">
+                                                            <Phone size={11} weight="duotone" /> {c.assigned_staff.phone}
+                                                        </a>
+                                                    )}
+                                                    {c.assigned_staff.email && (
+                                                        <a href={`mailto:${c.assigned_staff.email}`} className="text-[11px] text-brand-action hover:underline flex items-center gap-1">
+                                                            <EnvelopeSimple size={11} weight="duotone" /> Email
+                                                        </a>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : isStaff ? (
+                                            <div className="mt-3 p-2 border border-dashed border-brand-line rounded-sm text-[11px] text-brand-inkSoft flex items-center gap-1.5">
+                                                <UserGear size={12} /> Not yet assigned — pick staff below
+                                            </div>
+                                        ) : null}
+
+                                        <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
                                             <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">{c.created_by_name}</p>
                                             {isStaff && (
-                                                <Select value={c.status} onValueChange={(v) => updateStatus(c, v)}>
-                                                    <SelectTrigger data-testid={`complaint-status-${c.id}`} className="h-7 text-xs rounded-sm border-brand-line w-32"><SelectValue /></SelectTrigger>
-                                                    <SelectContent>{STATUSES.map(s => <SelectItem key={s} value={s}>{s.replace("_", " ")}</SelectItem>)}</SelectContent>
-                                                </Select>
+                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                    <Select value={c.assigned_to || UNASSIGNED} onValueChange={(v) => reassign(c, v)}>
+                                                        <SelectTrigger data-testid={`complaint-assign-${c.id}`} className="h-7 text-xs rounded-sm border-brand-line w-36"><SelectValue placeholder="Assign" /></SelectTrigger>
+                                                        <SelectContent>
+                                                            <SelectItem value={UNASSIGNED}>Unassigned</SelectItem>
+                                                            {staff.filter(s => s.is_active).map(s => (
+                                                                <SelectItem key={s.id} value={s.id}>{s.name} · {s.category}</SelectItem>
+                                                            ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                    <Select value={c.status} onValueChange={(v) => updateStatus(c, v)}>
+                                                        <SelectTrigger data-testid={`complaint-status-${c.id}`} className="h-7 text-xs rounded-sm border-brand-line w-28"><SelectValue /></SelectTrigger>
+                                                        <SelectContent>{STATUSES.map(s => <SelectItem key={s} value={s}>{s.replace("_", " ")}</SelectItem>)}</SelectContent>
+                                                    </Select>
+                                                </div>
                                             )}
                                         </div>
                                     </div>
@@ -130,7 +183,7 @@ export default function Complaints() {
                         </div>
                         <div className="space-y-2"><Label>Category</Label>
                             <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
-                                <SelectTrigger className="rounded-sm border-brand-line"><SelectValue /></SelectTrigger>
+                                <SelectTrigger data-testid="complaint-category-select" className="rounded-sm border-brand-line"><SelectValue /></SelectTrigger>
                                 <SelectContent>{CATS.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}</SelectContent>
                             </Select>
                         </div>

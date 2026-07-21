@@ -22,6 +22,7 @@ import Directory from "@/pages/Directory";
 import MyFlat from "@/pages/MyFlat";
 import InvoiceView from "@/pages/InvoiceView";
 import MasterConsole from "@/pages/MasterConsole";
+import Staff from "@/pages/Staff";
 import "@/App.css";
 
 function Protected({ children, roles }) {
@@ -71,6 +72,7 @@ function App() {
                             <Route path="invoices/:id" element={<InvoiceView />} />
                             <Route path="expenses" element={<Expenses />} />
                             <Route path="complaints" element={<Complaints />} />
+                            <Route path="staff" element={<Staff />} />
                             <Route path="announcements" element={<Announcements />} />
                             <Route path="visitors" element={<Visitors />} />
                             <Route path="amenities" element={<Amenities />} />

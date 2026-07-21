@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import api, { formatError, API_BASE } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, EmptyState, Chip } from "@/components/Shared";
+import { PageHeader, EmptyState, Chip, StatCard } from "@/components/Shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Trash, Paperclip, DownloadSimple } from "@phosphor-icons/react";
+import { Plus, Trash, Paperclip, DownloadSimple, TrendUp, TrendDown } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 const inr = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n || 0);
@@ -17,19 +17,26 @@ const CATS = ["maintenance", "repairs", "utilities", "security", "cleaning", "ev
 export default function Expenses() {
     const { user } = useAuth();
     const [expenses, setExpenses] = useState([]);
+    const [stats, setStats] = useState(null);
     const [open, setOpen] = useState(false);
     const [form, setForm] = useState({ title: "", amount: "", category: "maintenance", date: "", description: "", receipt_file_id: "" });
     const [uploading, setUploading] = useState(false);
     const [receiptName, setReceiptName] = useState("");
     const fileRef = useRef();
 
+    const isStaff = user?.role === "admin" || user?.role === "committee";
+
     async function load() {
-        try { const { data } = await api.get("/expenses"); setExpenses(data); }
+        try {
+            const calls = [api.get("/expenses")];
+            if (isStaff) calls.push(api.get("/expenses/stats"));
+            const results = await Promise.all(calls);
+            setExpenses(results[0].data);
+            if (isStaff) setStats(results[1].data);
+        }
         catch (e) { toast.error(formatError(e)); }
     }
-    useEffect(() => { load(); }, []);
-
-    const isStaff = user?.role === "admin" || user?.role === "committee";
+    useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
     async function uploadReceipt(e) {
         const file = e.target.files?.[0];
@@ -82,6 +89,76 @@ export default function Expenses() {
                     </Button>
                 )}
             />
+
+            {isStaff && stats && (
+                <div data-testid="expense-dashboard" className="mb-8 space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <StatCard label="Income (12mo)" value={inr(stats.totals.income)} hint="Paid invoices" />
+                        <StatCard label="Spent (12mo)" value={inr(stats.totals.spent)} hint={`across ${stats.categories.length} categories`} />
+                        <StatCard label="Net" value={inr(stats.totals.net)} hint={stats.totals.net >= 0 ? "In the black" : "Running a deficit"} accent={stats.totals.net < 0} />
+                        <StatCard label="3-mo projection · spent" value={inr(stats.avg.spent)} hint={`avg / month`} />
+                    </div>
+
+                    <div className="grid md:grid-cols-3 gap-4">
+                        <div className="md:col-span-2 bg-white border border-brand-line rounded-sm p-5">
+                            <div className="flex items-center gap-2 mb-4">
+                                <TrendUp size={16} className="text-brand-action" weight="duotone" />
+                                <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">Income vs Spent · last 12 months + next 3 (projected)</p>
+                            </div>
+                            <div className="flex items-end gap-2 h-40">
+                                {[...stats.series, ...stats.projection].map((t, i) => {
+                                    const combined = [...stats.series, ...stats.projection];
+                                    const max = Math.max(...combined.flatMap(x => [x.income, x.spent]), 1);
+                                    const isProj = i >= stats.series.length;
+                                    const iH = (t.income / max) * 100;
+                                    const sH = (t.spent / max) * 100;
+                                    return (
+                                        <div key={`${t.month}-${i}`} className="flex-1 flex flex-col items-center gap-1" data-testid={`expense-bar-${t.month}`}>
+                                            <div className="w-full flex items-end gap-0.5 flex-1 relative">
+                                                <div className={`flex-1 rounded-t-sm ${isProj ? "bg-[#1F5B32]/40 border border-dashed border-[#1F5B32]/60" : "bg-[#1F5B32]"}`} style={{ height: `${iH}%` }} title={`Income ${inr(t.income)}`}></div>
+                                                <div className={`flex-1 rounded-t-sm ${isProj ? "bg-brand-action/40 border border-dashed border-brand-action/60" : "bg-brand-action"}`} style={{ height: `${sH}%` }} title={`Spent ${inr(t.spent)}`}></div>
+                                            </div>
+                                            <p className={`text-[9px] ${isProj ? "text-brand-inkSoft italic" : "text-brand-inkSoft"}`}>{t.month.slice(5)}</p>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                            <div className="flex flex-wrap gap-4 mt-4 text-[10px] uppercase tracking-overline text-brand-inkSoft">
+                                <span className="flex items-center gap-1.5"><span className="w-3 h-3 bg-[#1F5B32] rounded-sm"></span> Income</span>
+                                <span className="flex items-center gap-1.5"><span className="w-3 h-3 bg-brand-action rounded-sm"></span> Spent</span>
+                                <span className="flex items-center gap-1.5"><span className="w-3 h-3 bg-brand-action/40 border border-dashed border-brand-action/60 rounded-sm"></span> Projected</span>
+                            </div>
+                        </div>
+
+                        <div className="bg-white border border-brand-line rounded-sm p-5" data-testid="expense-categories">
+                            <div className="flex items-center gap-2 mb-4">
+                                <TrendDown size={16} className="text-brand-action" weight="duotone" />
+                                <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">Spent by category</p>
+                            </div>
+                            {stats.categories.length === 0 ? (
+                                <p className="text-xs text-brand-inkSoft">No expenses this window.</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    {stats.categories.slice(0, 6).map(c => {
+                                        const pct = stats.totals.spent > 0 ? (c.total / stats.totals.spent) * 100 : 0;
+                                        return (
+                                            <div key={c.category}>
+                                                <div className="flex items-center justify-between text-xs text-brand-ink">
+                                                    <span className="capitalize font-medium">{c.category}</span>
+                                                    <span className="text-brand-inkSoft">{inr(c.total)}</span>
+                                                </div>
+                                                <div className="h-1.5 bg-brand-sage/50 rounded-full mt-1 overflow-hidden">
+                                                    <div className="h-full bg-brand-action" style={{ width: `${pct}%` }}></div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <div className="bg-white border border-brand-line rounded-sm p-6 mb-6 flex items-center justify-between">
                 <div>
