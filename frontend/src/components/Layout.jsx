@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import Logo from "@/components/Logo";
 import { Button } from "@/components/ui/button";
+import { fileDownloadUrl } from "@/lib/files";
 
 const NAV = [
     { to: "/app", label: "Overview", icon: House, roles: ["admin", "committee", "resident"], end: true, testId: "nav-overview" },
@@ -32,6 +33,7 @@ export default function Layout() {
     const [settingsOpen, setSettingsOpen] = useState(false);
     const items = NAV.filter((n) => n.roles.includes(user?.role));
     const societyName = society?.name || "maintyn";
+    const societyLogoUrl = fileDownloadUrl(society?.logo_file_id);
     const isAdmin = user?.role === "admin";
 
     return (
@@ -43,13 +45,18 @@ export default function Layout() {
             >
                 <div className="px-6 py-6 border-b border-white/5">
                     <div className="flex items-center gap-2">
-                        <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
-                            <rect x="2" y="10" width="28" height="20" rx="1" fill="#F6F4F1" />
-                            <path d="M2 10 L16 2 L30 10" stroke="#F6F4F1" strokeWidth="2" strokeLinejoin="round" fill="none" />
-                            <rect x="7" y="16" width="4" height="6" fill="#C85A3C" />
-                            <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
-                            <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
-                        </svg>
+                        {societyLogoUrl ? (
+                            <img src={societyLogoUrl} alt="logo" data-testid="sidebar-society-logo"
+                                className="w-8 h-8 rounded-sm object-contain bg-white/10 p-0.5" />
+                        ) : (
+                            <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
+                                <rect x="2" y="10" width="28" height="20" rx="1" fill="#F6F4F1" />
+                                <path d="M2 10 L16 2 L30 10" stroke="#F6F4F1" strokeWidth="2" strokeLinejoin="round" fill="none" />
+                                <rect x="7" y="16" width="4" height="6" fill="#C85A3C" />
+                                <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
+                                <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
+                            </svg>
+                        )}
                         <div className="min-w-0 flex-1">
                             <p className="font-heading font-bold text-lg tracking-tight text-white truncate" data-testid="sidebar-society-name">
                                 {societyName}

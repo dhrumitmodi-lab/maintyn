@@ -8,13 +8,15 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash, CheckCircle, Stack } from "@phosphor-icons/react";
+import { Plus, Trash, CheckCircle, Stack, Eye } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { useNavigate } from "react-router-dom";
 
 const inr = (n) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n || 0);
 
 export default function Invoices() {
     const { user } = useAuth();
+    const nav = useNavigate();
     const [invoices, setInvoices] = useState([]);
     const [flats, setFlats] = useState([]);
     const [open, setOpen] = useState(false);
@@ -116,6 +118,10 @@ export default function Invoices() {
                                     <td className="py-3 px-4 text-brand-inkSoft">{inv.due_date}</td>
                                     <td className="py-3 px-4"><Chip variant={inv.status === "paid" ? "success" : "warn"}>{inv.status}</Chip></td>
                                     <td className="py-3 px-4 text-right">
+                                        <button data-testid={`view-invoice-${inv.id}`} onClick={() => nav(`/app/invoices/${inv.id}`)}
+                                            className="text-brand-ink hover:text-brand-action text-xs font-medium inline-flex items-center gap-1 mr-3">
+                                            <Eye size={13} /> View
+                                        </button>
                                         {inv.status !== "paid" && (
                                             <button data-testid={`pay-invoice-${inv.id}`} onClick={() => markPaid(inv)} className="text-brand-action hover:underline text-xs font-medium">Mark paid</button>
                                         )}

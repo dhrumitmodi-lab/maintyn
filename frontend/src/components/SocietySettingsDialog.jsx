@@ -1,18 +1,27 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import api, { formatError } from "@/lib/api";
 import { useSociety } from "@/context/SocietyContext";
+import { fileDownloadUrl } from "@/lib/files";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { UploadSimple, Trash, Bank, QrCode, House } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 export default function SocietySettingsDialog({ open, onOpenChange }) {
     const { society, setSociety } = useSociety();
     const [form, setForm] = useState({
-        name: "", address: "", city: "", established_year: "", contact_email: "", contact_phone: "",
+        name: "", address: "", city: "", established_year: "",
+        contact_email: "", contact_phone: "",
+        logo_file_id: "", upi_id: "", upi_qr_file_id: "",
+        bank_name: "", bank_account_number: "", bank_account_holder: "", bank_ifsc: "",
     });
     const [busy, setBusy] = useState(false);
+    const [uploading, setUploading] = useState({ logo: false, qr: false });
+    const logoRef = useRef();
+    const qrRef = useRef();
 
     React.useEffect(() => {
         if (open && society) {
@@ -23,9 +32,28 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
                 established_year: society.established_year || "",
                 contact_email: society.contact_email || "",
                 contact_phone: society.contact_phone || "",
+                logo_file_id: society.logo_file_id || "",
+                upi_id: society.upi_id || "",
+                upi_qr_file_id: society.upi_qr_file_id || "",
+                bank_name: society.bank_name || "",
+                bank_account_number: society.bank_account_number || "",
+                bank_account_holder: society.bank_account_holder || "",
+                bank_ifsc: society.bank_ifsc || "",
             });
         }
     }, [open, society]);
+
+    async function uploadFile(key, file) {
+        setUploading((u) => ({ ...u, [key]: true }));
+        try {
+            const fd = new FormData();
+            fd.append("file", file);
+            const { data } = await api.post("/files/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+            setForm((f) => ({ ...f, [key === "logo" ? "logo_file_id" : "upi_qr_file_id"]: data.id }));
+            toast.success(`${key === "logo" ? "Logo" : "QR code"} uploaded`);
+        } catch (e) { toast.error(formatError(e)); }
+        finally { setUploading((u) => ({ ...u, [key]: false })); }
+    }
 
     async function submit(e) {
         e.preventDefault();
@@ -33,7 +61,7 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
         try {
             const payload = { ...form };
             payload.established_year = form.established_year ? Number(form.established_year) : null;
-            Object.keys(payload).forEach(k => { if (payload[k] === "") payload[k] = null; });
+            Object.keys(payload).forEach((k) => { if (payload[k] === "") payload[k] = null; });
             const { data } = await api.patch("/society", payload);
             setSociety(data);
             toast.success("Society settings saved");
@@ -42,57 +70,176 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
         finally { setBusy(false); }
     }
 
+    const logoUrl = fileDownloadUrl(form.logo_file_id);
+    const qrUrl = fileDownloadUrl(form.upi_qr_file_id);
+
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="rounded-sm max-w-lg">
+            <DialogContent className="rounded-sm max-w-2xl max-h-[90vh] overflow-y-auto">
                 <DialogHeader>
                     <DialogTitle className="font-heading text-2xl tracking-tight">Society settings</DialogTitle>
                 </DialogHeader>
                 <p className="text-sm text-brand-inkSoft -mt-2">
-                    The society name shows on the sidebar, landing page and every email.
+                    Society name & logo appear on the sidebar, header and every invoice. UPI & bank details show on invoices so residents can pay directly.
                 </p>
-                <form onSubmit={submit} className="space-y-4">
-                    <div className="space-y-2">
-                        <Label>Society name</Label>
-                        <Input data-testid="society-name-input" required value={form.name}
-                            onChange={(e) => setForm({ ...form, name: e.target.value })}
-                            placeholder="Green Valley Residency"
-                            className="rounded-sm border-brand-line h-11" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                            <Label>City</Label>
-                            <Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })}
-                                placeholder="Bengaluru" className="rounded-sm border-brand-line h-11" />
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Established</Label>
-                            <Input type="number" min={1900} max={2100} value={form.established_year}
-                                onChange={(e) => setForm({ ...form, established_year: e.target.value })}
-                                placeholder="2015" className="rounded-sm border-brand-line h-11" />
-                        </div>
-                    </div>
-                    <div className="space-y-2">
-                        <Label>Address</Label>
-                        <Input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}
-                            placeholder="123 Main Road, Sector 5"
-                            className="rounded-sm border-brand-line h-11" />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                            <Label>Contact email</Label>
-                            <Input type="email" value={form.contact_email}
-                                onChange={(e) => setForm({ ...form, contact_email: e.target.value })}
-                                className="rounded-sm border-brand-line h-11" />
-                        </div>
-                        <div className="space-y-2">
-                            <Label>Contact phone</Label>
-                            <Input value={form.contact_phone}
-                                onChange={(e) => setForm({ ...form, contact_phone: e.target.value })}
-                                className="rounded-sm border-brand-line h-11" />
-                        </div>
-                    </div>
-                    <DialogFooter>
+                <form onSubmit={submit}>
+                    <Tabs defaultValue="general" className="w-full">
+                        <TabsList className="bg-brand-bg border border-brand-line rounded-full p-1 mb-4">
+                            <TabsTrigger data-testid="settings-tab-general" value="general" className="rounded-full data-[state=active]:bg-brand-ink data-[state=active]:text-white px-4">
+                                <House size={14} className="mr-1.5" /> General
+                            </TabsTrigger>
+                            <TabsTrigger data-testid="settings-tab-payment" value="payment" className="rounded-full data-[state=active]:bg-brand-ink data-[state=active]:text-white px-4">
+                                <QrCode size={14} className="mr-1.5" /> UPI
+                            </TabsTrigger>
+                            <TabsTrigger data-testid="settings-tab-bank" value="bank" className="rounded-full data-[state=active]:bg-brand-ink data-[state=active]:text-white px-4">
+                                <Bank size={14} className="mr-1.5" /> Bank
+                            </TabsTrigger>
+                        </TabsList>
+
+                        <TabsContent value="general" className="space-y-4">
+                            <div className="space-y-2">
+                                <Label>Society name</Label>
+                                <Input data-testid="society-name-input" required value={form.name}
+                                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                                    placeholder="Green Valley Residency"
+                                    className="rounded-sm border-brand-line h-11" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-2">
+                                    <Label>City</Label>
+                                    <Input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })}
+                                        placeholder="Bengaluru" className="rounded-sm border-brand-line h-11" />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Established year</Label>
+                                    <Input type="number" min={1900} max={2100} value={form.established_year}
+                                        onChange={(e) => setForm({ ...form, established_year: e.target.value })}
+                                        placeholder="2015" className="rounded-sm border-brand-line h-11" />
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Address</Label>
+                                <Input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}
+                                    placeholder="123 Main Road, Sector 5"
+                                    className="rounded-sm border-brand-line h-11" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-2">
+                                    <Label>Contact email</Label>
+                                    <Input type="email" value={form.contact_email}
+                                        onChange={(e) => setForm({ ...form, contact_email: e.target.value })}
+                                        className="rounded-sm border-brand-line h-11" />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>Contact phone</Label>
+                                    <Input value={form.contact_phone}
+                                        onChange={(e) => setForm({ ...form, contact_phone: e.target.value })}
+                                        className="rounded-sm border-brand-line h-11" />
+                                </div>
+                            </div>
+                            <div className="space-y-2 border-t border-brand-line pt-4">
+                                <Label>Society logo</Label>
+                                <p className="text-xs text-brand-inkSoft">Shows on the sidebar and top of every invoice. PNG or JPG, ideally square.</p>
+                                <div className="flex items-center gap-4">
+                                    <div className="w-20 h-20 rounded-sm border border-brand-line bg-brand-bg flex items-center justify-center overflow-hidden">
+                                        {logoUrl ? <img src={logoUrl} alt="logo" className="w-full h-full object-contain" data-testid="society-logo-preview" />
+                                            : <House size={28} className="text-brand-inkSoft" />}
+                                    </div>
+                                    <input ref={logoRef} type="file" accept="image/*" className="hidden"
+                                        onChange={(e) => e.target.files?.[0] && uploadFile("logo", e.target.files[0])} />
+                                    <div className="flex flex-col gap-2">
+                                        <Button type="button" variant="outline" data-testid="society-upload-logo"
+                                            onClick={() => logoRef.current?.click()} disabled={uploading.logo}
+                                            className="rounded-full border-brand-line">
+                                            <UploadSimple size={14} className="mr-1.5" />
+                                            {uploading.logo ? "Uploading..." : logoUrl ? "Replace" : "Upload logo"}
+                                        </Button>
+                                        {logoUrl && (
+                                            <button type="button" data-testid="society-remove-logo"
+                                                onClick={() => setForm({ ...form, logo_file_id: "" })}
+                                                className="text-xs text-brand-action hover:underline flex items-center gap-1">
+                                                <Trash size={12} /> Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        </TabsContent>
+
+                        <TabsContent value="payment" className="space-y-4">
+                            <div className="space-y-2">
+                                <Label>UPI ID</Label>
+                                <p className="text-xs text-brand-inkSoft">e.g. <span className="font-mono">society.treasurer@icici</span> — a QR code will be auto-generated on the invoice from this ID.</p>
+                                <Input data-testid="society-upi-input" value={form.upi_id}
+                                    onChange={(e) => setForm({ ...form, upi_id: e.target.value })}
+                                    placeholder="society.treasurer@icici"
+                                    className="rounded-sm border-brand-line h-11 font-mono" />
+                            </div>
+                            <div className="border-t border-brand-line pt-4">
+                                <Label>Or upload your own UPI QR image</Label>
+                                <p className="text-xs text-brand-inkSoft mt-1">Optional — if you upload one, this image is shown on the invoice instead of the auto-generated QR.</p>
+                                <div className="flex items-center gap-4 mt-3">
+                                    <div className="w-24 h-24 rounded-sm border border-brand-line bg-brand-bg flex items-center justify-center overflow-hidden">
+                                        {qrUrl ? <img src={qrUrl} alt="qr" className="w-full h-full object-contain" data-testid="society-qr-preview" />
+                                            : <QrCode size={30} className="text-brand-inkSoft" />}
+                                    </div>
+                                    <input ref={qrRef} type="file" accept="image/*" className="hidden"
+                                        onChange={(e) => e.target.files?.[0] && uploadFile("qr", e.target.files[0])} />
+                                    <div className="flex flex-col gap-2">
+                                        <Button type="button" variant="outline" data-testid="society-upload-qr"
+                                            onClick={() => qrRef.current?.click()} disabled={uploading.qr}
+                                            className="rounded-full border-brand-line">
+                                            <UploadSimple size={14} className="mr-1.5" />
+                                            {uploading.qr ? "Uploading..." : qrUrl ? "Replace" : "Upload QR image"}
+                                        </Button>
+                                        {qrUrl && (
+                                            <button type="button" data-testid="society-remove-qr"
+                                                onClick={() => setForm({ ...form, upi_qr_file_id: "" })}
+                                                className="text-xs text-brand-action hover:underline flex items-center gap-1">
+                                                <Trash size={12} /> Remove
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        </TabsContent>
+
+                        <TabsContent value="bank" className="space-y-4">
+                            <p className="text-sm text-brand-inkSoft">Shown on the invoice so residents can do a direct NEFT/RTGS/IMPS transfer.</p>
+                            <div className="space-y-2">
+                                <Label>Account holder name</Label>
+                                <Input data-testid="society-bank-holder-input" value={form.bank_account_holder}
+                                    onChange={(e) => setForm({ ...form, bank_account_holder: e.target.value })}
+                                    placeholder="Green Valley Residency Welfare Association"
+                                    className="rounded-sm border-brand-line h-11" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-2">
+                                    <Label>Bank name</Label>
+                                    <Input data-testid="society-bank-name-input" value={form.bank_name}
+                                        onChange={(e) => setForm({ ...form, bank_name: e.target.value })}
+                                        placeholder="ICICI Bank"
+                                        className="rounded-sm border-brand-line h-11" />
+                                </div>
+                                <div className="space-y-2">
+                                    <Label>IFSC</Label>
+                                    <Input data-testid="society-bank-ifsc-input" value={form.bank_ifsc}
+                                        onChange={(e) => setForm({ ...form, bank_ifsc: e.target.value.toUpperCase() })}
+                                        placeholder="ICIC0001234"
+                                        className="rounded-sm border-brand-line h-11 font-mono" />
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <Label>Account number</Label>
+                                <Input data-testid="society-bank-account-input" value={form.bank_account_number}
+                                    onChange={(e) => setForm({ ...form, bank_account_number: e.target.value })}
+                                    placeholder="0123 4567 8901 2345"
+                                    className="rounded-sm border-brand-line h-11 font-mono" />
+                            </div>
+                        </TabsContent>
+                    </Tabs>
+
+                    <DialogFooter className="mt-6">
                         <Button type="button" variant="outline" onClick={() => onOpenChange(false)} className="rounded-full">Cancel</Button>
                         <Button type="submit" data-testid="society-save-btn" disabled={busy}
                             className="rounded-full bg-brand-action hover:bg-brand-actionHover">

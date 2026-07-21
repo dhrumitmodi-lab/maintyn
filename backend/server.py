@@ -269,6 +269,13 @@ class SocietyIn(BaseModel):
     established_year: Optional[int] = None
     contact_email: Optional[EmailStr] = None
     contact_phone: Optional[str] = None
+    logo_file_id: Optional[str] = None
+    upi_id: Optional[str] = None
+    upi_qr_file_id: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_number: Optional[str] = None
+    bank_account_holder: Optional[str] = None
+    bank_ifsc: Optional[str] = None
 
 UTILITY_TYPES = ("electricity", "piped_gas", "water", "internet", "dth", "other")
 
@@ -389,6 +396,13 @@ async def _get_society():
             "established_year": None,
             "contact_email": None,
             "contact_phone": None,
+            "logo_file_id": None,
+            "upi_id": None,
+            "upi_qr_file_id": None,
+            "bank_name": None,
+            "bank_account_number": None,
+            "bank_account_holder": None,
+            "bank_ifsc": None,
             "is_setup": False,
             "created_at": now_iso(),
         }
@@ -402,7 +416,10 @@ async def get_society(_: dict = Depends(get_current_user)):
 
 @api.patch("/society")
 async def update_society(data: SocietyIn, _: dict = Depends(require_admin)):
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    """Update society settings. Explicit empty strings clear a value; missing fields are untouched."""
+    upd = {}
+    for k, v in data.model_dump(exclude_unset=True).items():
+        upd[k] = None if v == "" else v
     upd["is_setup"] = True
     upd["updated_at"] = now_iso()
     await db.society.update_one({"id": SOCIETY_ID}, {"$set": upd}, upsert=True)
