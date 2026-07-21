@@ -5,15 +5,20 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import io
+import csv
 import uuid
+import secrets
+import asyncio
 import logging
 import bcrypt
 import jwt
+import httpx
 import requests
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Form, Header, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Form, Header, Query, BackgroundTasks
 from fastapi.responses import Response as FastAPIResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -27,6 +32,10 @@ JWT_ALGORITHM = "HS256"
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 APP_NAME = os.environ.get('APP_NAME', 'maintyn')
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+EMAIL_BASE_URL = "https://integrations.emergentagent.com"
+EMERGENT_EMAIL_KEY = os.environ.get('EMERGENT_EMAIL_KEY')
+EMAIL_FROM_NAME = os.environ.get('EMAIL_FROM_NAME', 'maintyn')
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -74,6 +83,47 @@ def get_object(path: str):
                      headers={"X-Storage-Key": key}, timeout=60)
     r.raise_for_status()
     return r.content, r.headers.get("Content-Type", "application/octet-stream")
+
+# ---------- Email ----------
+async def send_email_raw(to: str, subject: str, html: str):
+    if not EMERGENT_EMAIL_KEY:
+        logger.warning("EMERGENT_EMAIL_KEY not set - skipping email")
+        return
+    payload = {"to": [to], "subject": subject, "html": html, "from_name": EMAIL_FROM_NAME}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{EMAIL_BASE_URL}/api/v1/email/send",
+                                     headers={"X-Email-Key": EMERGENT_EMAIL_KEY},
+                                     json=payload)
+        if resp.status_code >= 400:
+            logger.error(f"Email failed {resp.status_code}: {resp.text}")
+        else:
+            logger.info(f"Email sent to {to}: {subject}")
+    except Exception as e:
+        logger.error(f"Email exception: {e}")
+
+def _email_frame(title: str, body_html: str, cta_url: Optional[str] = None, cta_text: Optional[str] = None) -> str:
+    cta = ""
+    if cta_url and cta_text:
+        cta = (f'<p style="margin:24px 0"><a href="{cta_url}" '
+               f'style="background:#C85A3C;color:#fff;text-decoration:none;padding:12px 24px;'
+               f'border-radius:999px;font-family:Arial,sans-serif;font-weight:600;display:inline-block">'
+               f'{cta_text}</a></p>')
+    return f"""
+    <table width="100%" cellpadding="0" cellspacing="0" style="background:#F6F4F1;padding:32px 12px;font-family:Arial,sans-serif;color:#1B3127">
+      <tr><td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#fff;border:1px solid #E2DFD8;border-radius:4px;padding:32px">
+          <tr><td>
+            <p style="margin:0 0 8px 0;letter-spacing:0.2em;font-size:11px;text-transform:uppercase;color:#576B61">maintyn · community os</p>
+            <h1 style="margin:0 0 16px 0;font-size:24px;color:#1B3127">{title}</h1>
+            <div style="font-size:15px;line-height:1.6;color:#1B3127">{body_html}</div>
+            {cta}
+            <p style="font-size:12px;color:#576B61;margin-top:24px">— Team maintyn</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+    """
 
 # ---------- Password / JWT ----------
 def hash_password(pw: str) -> str:
@@ -272,6 +322,59 @@ async def logout(response: Response, _: dict = Depends(get_current_user)):
 async def me(user: dict = Depends(get_current_user)):
     return await enrich_user_flat(user)
 
+# ---------- Password Reset ----------
+class ForgotIn(BaseModel):
+    email: EmailStr
+
+class ResetIn(BaseModel):
+    token: str
+    password: str = Field(min_length=6)
+
+@api.post("/auth/forgot-password")
+async def forgot_password(data: ForgotIn, background: BackgroundTasks):
+    email = data.email.lower()
+    user = await db.users.find_one({"email": email})
+    # Always return ok to avoid email enumeration
+    if user:
+        token = secrets.token_urlsafe(32)
+        expires = datetime.now(timezone.utc) + timedelta(hours=1)
+        await db.password_reset_tokens.insert_one({
+            "token": token,
+            "user_id": user["id"],
+            "email": email,
+            "expires_at": expires,
+            "used": False,
+            "created_at": now_iso(),
+        })
+        link = f"{FRONTEND_URL}/reset-password?token={token}"
+        body = (f"<p>Hi {user['name']},</p>"
+                f"<p>Someone (hopefully you) asked to reset your maintyn password. "
+                f"Click the button below within the next hour to choose a new one. "
+                f"If it wasn't you, you can safely ignore this email.</p>"
+                f"<p style='font-size:12px;color:#576B61'>Or paste this link into your browser:<br>"
+                f"<span style='word-break:break-all'>{link}</span></p>")
+        html = _email_frame("Reset your password", body, link, "Reset password")
+        background.add_task(send_email_raw, email, "Reset your maintyn password", html)
+        logger.info(f"Password reset link for {email}: {link}")
+    return {"ok": True}
+
+@api.post("/auth/reset-password")
+async def reset_password(data: ResetIn):
+    rec = await db.password_reset_tokens.find_one({"token": data.token})
+    if not rec or rec.get("used"):
+        raise HTTPException(400, "Invalid or expired token")
+    exp = rec["expires_at"]
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp)
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < datetime.now(timezone.utc):
+        raise HTTPException(400, "Token expired")
+    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password_hash": hash_password(data.password)}})
+    await db.password_reset_tokens.update_one({"token": data.token}, {"$set": {"used": True}})
+    return {"ok": True}
+
+
 # ---------- Users ----------
 @api.get("/users")
 async def list_users(user: dict = Depends(require_staff)):
@@ -322,6 +425,48 @@ async def delete_user(uid: str, current: dict = Depends(require_admin)):
         raise HTTPException(404, "User not found")
     return {"ok": True}
 
+@api.post("/users/import-csv")
+async def import_users_csv(file: UploadFile = File(...), _: dict = Depends(require_admin)):
+    """CSV columns: name, email, phone, role, password, block, flat_number"""
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    created, skipped, errors = 0, 0, []
+    for i, row in enumerate(reader, start=2):
+        try:
+            email = (row.get("email") or "").strip().lower()
+            name = (row.get("name") or "").strip()
+            if not email or not name:
+                errors.append(f"Row {i}: missing name/email")
+                continue
+            if await db.users.find_one({"email": email}):
+                skipped += 1
+                continue
+            role = (row.get("role") or "resident").strip().lower()
+            if role not in ("admin", "committee", "resident"):
+                role = "resident"
+            password = (row.get("password") or "welcome123").strip()
+            flat_id = None
+            block = (row.get("block") or "").strip()
+            fnum = (row.get("flat_number") or "").strip()
+            if block and fnum:
+                f = await db.flats.find_one({"block": block, "number": fnum})
+                if f:
+                    flat_id = f["id"]
+            await db.users.insert_one({
+                "id": new_id(),
+                "email": email,
+                "password_hash": hash_password(password),
+                "name": name,
+                "phone": (row.get("phone") or "").strip() or None,
+                "role": role,
+                "flat_id": flat_id,
+                "created_at": now_iso(),
+            })
+            created += 1
+        except Exception as e:
+            errors.append(f"Row {i}: {e}")
+    return {"created": created, "skipped": skipped, "errors": errors}
+
 # ---------- Flats ----------
 @api.get("/flats")
 async def list_flats(user: dict = Depends(get_current_user)):
@@ -357,7 +502,74 @@ async def delete_flat(fid: str, _: dict = Depends(require_admin)):
     await db.users.update_many({"flat_id": fid}, {"$set": {"flat_id": None}})
     return {"ok": True}
 
+@api.post("/flats/import-csv")
+async def import_flats_csv(file: UploadFile = File(...), _: dict = Depends(require_staff)):
+    """CSV columns: block, number, floor (optional), bhk (optional), occupancy (optional; owner/tenant/vacant)"""
+    content = (await file.read()).decode("utf-8", errors="ignore")
+    reader = csv.DictReader(io.StringIO(content))
+    created, skipped, errors = 0, 0, []
+    for i, row in enumerate(reader, start=2):
+        try:
+            block = (row.get("block") or "").strip()
+            number = (row.get("number") or "").strip()
+            if not block or not number:
+                errors.append(f"Row {i}: missing block/number")
+                continue
+            if await db.flats.find_one({"block": block, "number": number}):
+                skipped += 1
+                continue
+            occupancy = (row.get("occupancy") or "vacant").strip().lower()
+            if occupancy not in ("owner", "tenant", "vacant"):
+                occupancy = "vacant"
+            await db.flats.insert_one({
+                "id": new_id(),
+                "block": block,
+                "number": number,
+                "floor": (row.get("floor") or "").strip() or None,
+                "bhk": (row.get("bhk") or "").strip() or None,
+                "owner_id": None,
+                "tenant_id": None,
+                "occupancy": occupancy,
+                "created_at": now_iso(),
+            })
+            created += 1
+        except Exception as e:
+            errors.append(f"Row {i}: {e}")
+    return {"created": created, "skipped": skipped, "errors": errors}
+
 # ---------- Invoices ----------
+async def _notify_invoice_created(flat_id: str, amount: float, description: str, month: str, due_date: str):
+    residents = await db.users.find({"flat_id": flat_id}, {"password_hash": 0}).to_list(50)
+    if not residents:
+        return
+    flat = await db.flats.find_one({"id": flat_id})
+    flat_label = f"{flat['block']}-{flat['number']}" if flat else "your flat"
+    subject = f"New invoice: {description}"
+    for r in residents:
+        body = (f"<p>Hi {r['name']},</p>"
+                f"<p>A new maintenance invoice has been raised for <b>{flat_label}</b>.</p>"
+                f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;margin:12px 0'>"
+                f"<tr><td style='color:#576B61'>Description</td><td><b>{description}</b></td></tr>"
+                f"<tr><td style='color:#576B61'>Amount</td><td><b>₹{amount:,.0f}</b></td></tr>"
+                f"<tr><td style='color:#576B61'>Month</td><td>{month}</td></tr>"
+                f"<tr><td style='color:#576B61'>Due date</td><td>{due_date}</td></tr>"
+                f"</table>"
+                f"<p>Sign in to mark this invoice as paid once you've settled it.</p>")
+        html = _email_frame("New invoice raised", body, f"{FRONTEND_URL}/app/invoices", "View invoices")
+        await send_email_raw(r["email"], subject, html)
+
+async def _notify_complaint_status(complaint: dict, new_status: str):
+    if not complaint.get("created_by"):
+        return
+    user = await db.users.find_one({"id": complaint["created_by"]})
+    if not user:
+        return
+    label = new_status.replace("_", " ").title()
+    body = (f"<p>Hi {user['name']},</p>"
+            f"<p>Your complaint <b>“{complaint['title']}”</b> is now <b>{label}</b>.</p>")
+    html = _email_frame(f"Complaint {label}", body, f"{FRONTEND_URL}/app/complaints", "View complaint")
+    await send_email_raw(user["email"], f"Complaint update: {complaint['title']}", html)
+
 @api.get("/invoices")
 async def list_invoices(user: dict = Depends(get_current_user)):
     query = {}
@@ -373,7 +585,7 @@ async def list_invoices(user: dict = Depends(get_current_user)):
     return docs
 
 @api.post("/invoices")
-async def create_invoice(data: InvoiceIn, user: dict = Depends(require_staff)):
+async def create_invoice(data: InvoiceIn, background: BackgroundTasks, user: dict = Depends(require_staff)):
     flat = await db.flats.find_one({"id": data.flat_id})
     if not flat:
         raise HTTPException(404, "Flat not found")
@@ -388,10 +600,11 @@ async def create_invoice(data: InvoiceIn, user: dict = Depends(require_staff)):
     }
     await db.invoices.insert_one(inv)
     inv.pop("_id", None)
+    background.add_task(_notify_invoice_created, data.flat_id, data.amount, data.description, data.month, data.due_date)
     return inv
 
 @api.post("/invoices/bulk")
-async def bulk_create_invoices(payload: dict, user: dict = Depends(require_staff)):
+async def bulk_create_invoices(payload: dict, background: BackgroundTasks, user: dict = Depends(require_staff)):
     """Create invoices for all flats. payload: {amount, description, month, due_date}"""
     amount = payload["amount"]
     description = payload["description"]
@@ -416,6 +629,7 @@ async def bulk_create_invoices(payload: dict, user: dict = Depends(require_staff
         await db.invoices.insert_one(inv)
         inv.pop("_id", None)
         created.append(inv)
+        background.add_task(_notify_invoice_created, f["id"], amount, description, month, due_date)
     return {"count": len(created)}
 
 @api.post("/invoices/{iid}/pay")
@@ -537,15 +751,18 @@ async def create_complaint(data: ComplaintIn, user: dict = Depends(get_current_u
     return c
 
 @api.patch("/complaints/{cid}")
-async def update_complaint(cid: str, data: ComplaintUpdate, user: dict = Depends(require_staff)):
+async def update_complaint(cid: str, data: ComplaintUpdate, background: BackgroundTasks, user: dict = Depends(require_staff)):
+    existing = await db.complaints.find_one({"id": cid})
+    if not existing:
+        raise HTTPException(404, "Complaint not found")
     upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
     if upd.get("status") == "resolved":
         upd["resolved_by"] = user["id"]
         upd["resolved_at"] = now_iso()
     await db.complaints.update_one({"id": cid}, {"$set": upd})
     doc = await db.complaints.find_one({"id": cid}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "Complaint not found")
+    if upd.get("status") and upd["status"] != existing.get("status"):
+        background.add_task(_notify_complaint_status, doc, upd["status"])
     return doc
 
 # ---------- Announcements ----------
@@ -674,6 +891,8 @@ async def startup():
     await db.announcements.create_index("id", unique=True)
     await db.visitors.create_index("id", unique=True)
     await db.files.create_index("id", unique=True)
+    await db.password_reset_tokens.create_index("token", unique=True)
+    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()

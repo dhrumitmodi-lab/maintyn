@@ -113,6 +113,12 @@ export default function Login() {
                         </Button>
                     </form>
 
+                    <div className="mt-4 flex items-center justify-between text-sm">
+                        <Link to="/forgot-password" data-testid="login-forgot" className="text-brand-inkSoft hover:text-brand-action">
+                            Forgot password?
+                        </Link>
+                    </div>
+
                     <p className="mt-6 text-sm text-brand-inkSoft">
                         New resident?{" "}
                         <Link to="/register" data-testid="login-goto-register" className="text-brand-action font-medium hover:underline">

@@ -7,8 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Trash, Plus, PencilSimple } from "@phosphor-icons/react";
+import { Trash, Plus, PencilSimple, UploadSimple } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import CsvImport from "@/components/CsvImport";
 
 const ROLES = ["admin", "committee", "resident"];
 
@@ -17,6 +18,7 @@ export default function Users() {
     const [users, setUsers] = useState([]);
     const [flats, setFlats] = useState([]);
     const [open, setOpen] = useState(false);
+    const [csvOpen, setCsvOpen] = useState(false);
     const [editing, setEditing] = useState(null);
     const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", role: "resident", flat_id: "" });
 
@@ -70,9 +72,15 @@ export default function Users() {
                 title="Residents"
                 description="Manage committee members, residents, and their flat assignments."
                 actions={canManage && (
-                    <Button data-testid="add-user-btn" onClick={openCreate} className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white active:scale-[0.98]">
-                        <Plus size={16} className="mr-1.5" /> Add resident
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                        <Button data-testid="import-users-btn" onClick={() => setCsvOpen(true)} variant="outline"
+                            className="rounded-full border-brand-ink text-brand-ink hover:bg-brand-ink hover:text-white">
+                            <UploadSimple size={16} className="mr-1.5" /> Import CSV
+                        </Button>
+                        <Button data-testid="add-user-btn" onClick={openCreate} className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white active:scale-[0.98]">
+                            <Plus size={16} className="mr-1.5" /> Add resident
+                        </Button>
+                    </div>
                 )}
             />
 
@@ -166,6 +174,16 @@ export default function Users() {
                     </form>
                 </DialogContent>
             </Dialog>
+
+            <CsvImport
+                open={csvOpen}
+                onOpenChange={setCsvOpen}
+                endpoint="/users/import-csv"
+                title="Import residents"
+                columns="name, email, phone, role, password, block, flat_number"
+                template={`name,email,phone,role,password,block,flat_number\nAsha Rao,asha@example.com,+919000000001,resident,welcome123,A,101\nRavi Kumar,ravi@example.com,+919000000002,resident,welcome123,A,102\n`}
+                onDone={load}
+            />
         </div>
     );
 }

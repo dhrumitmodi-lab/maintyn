@@ -1,0 +1,60 @@
+{
+  "summary": "Tested new features: password reset (forgot/reset), CSV imports for flats and users, email notifications on invoice + complaint status change. All 8 backend tests pass (after fixing a tz-comparison bug in /api/auth/reset-password). Frontend forgot/reset pages, and CSV import dialogs on /app/flats and /app/users work as expected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "CsvImport dialog", "issues": ["DialogContent missing Description/aria-describedby (a11y warning, non-blocking)"]}
+    ]
+  },
+  "bugs_fixed_by_testing_agent": [
+    {
+      "endpoint": "POST /api/auth/reset-password",
+      "issue": "TypeError: can't compare offset-naive and offset-aware datetimes → returned 500 for every valid token.",
+      "rca": "MongoDB (motor) returns datetime as timezone-naive UTC. Code compared it against `datetime.now(timezone.utc)` (tz-aware) causing TypeError.",
+      "fix": "Added tzinfo=UTC coercion when expires_at is naive, before comparison, in /app/backend/server.py reset_password()."
+    }
+  ],
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: add DialogDescription to CsvImport dialog to silence a11y console warning.",
+    "Optional: cleanup test-created flats/users (TB* / test_csv_* / TESTBLK) from previous iterations."
+  ],
+  "critical_code_review_comments": [
+    "reset_password now correctly handles naive datetime from MongoDB — good to add same guard whenever mongo dates are compared.",
+    "forgot_password logs the full reset link (with token) at INFO — acceptable for dev/staging but should be gated behind DEBUG or removed in production to avoid token leakage via logs.",
+    "_notify_invoice_created and _notify_complaint_status await send_email_raw sequentially inside a single BackgroundTask; if a flat has many residents this serializes. Consider asyncio.gather for parallelism.",
+    "CSV imports do not enforce max file size / row limit — could be DoS vector; consider capping."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (tz fix in reset_password)",
+    "/app/backend/tests/backend_test.py (new test file)"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (all data-testids present and functional)"},
+  "test_credentials": "admin@maintyn.app / Admin@12345 (restored by test teardown after reset-password e2e)",
+  "seed_data_creation": "Created transient test flats (block prefix TB<ts>) and users (email prefix test_csv_<ts>_) during CSV import tests; visible in Residents/Flats tables.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend fix applied to server.py:369 (naive datetime coercion). All new feature tests green. Some TEST_ / TESTBLK / TB* residual seed data present in DB — can be safely purged.",
+  "verified_features": [
+    "POST /api/auth/forgot-password (existing email) → 200 {ok:true}, backend log has reset link, Resend proxy 202",
+    "POST /api/auth/forgot-password (unknown email) → 200 {ok:true} (no enumeration)",
+    "POST /api/auth/reset-password (invalid token) → 400 'Invalid or expired token'",
+    "POST /api/auth/reset-password (valid token) → 200; login with new password succeeds; admin password restored after test",
+    "POST /api/flats/import-csv → creates 2, skips 1 duplicate, reports missing-row error",
+    "POST /api/users/import-csv → creates 2, links user to flat by block+number, reports missing name/email error",
+    "POST /api/invoices triggers background email — 'Email sent to <resident>: New invoice' in logs",
+    "PATCH /api/complaints/{id} status change triggers 'Email sent to <creator>: Complaint update: ...' in logs",
+    "Frontend /forgot-password renders and submits (forgot-email, forgot-submit → forgot-back-login on success)",
+    "Frontend /reset-password without token disables reset-submit; with token enables + submits",
+    "Frontend /app/flats has import-flats-btn opening dialog with csv-download-template, csv-pick-file, csv-upload-submit",
+    "Frontend /app/users has import-users-btn opening the same dialog"
+  ]
+}

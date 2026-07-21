@@ -7,13 +7,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, Trash, PencilSimple } from "@phosphor-icons/react";
+import { Plus, Trash, PencilSimple, UploadSimple } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import CsvImport from "@/components/CsvImport";
 
 export default function Flats() {
     const { user } = useAuth();
     const [flats, setFlats] = useState([]);
     const [open, setOpen] = useState(false);
+    const [csvOpen, setCsvOpen] = useState(false);
     const [editing, setEditing] = useState(null);
     const [form, setForm] = useState({ block: "", number: "", floor: "", bhk: "", occupancy: "vacant" });
 
@@ -62,9 +64,15 @@ export default function Flats() {
                 title="Flats"
                 description="Every unit in your society — with block, floor and occupancy."
                 actions={isStaff && (
-                    <Button data-testid="add-flat-btn" onClick={openCreate} className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white active:scale-[0.98]">
-                        <Plus size={16} className="mr-1.5" /> Add flat
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                        <Button data-testid="import-flats-btn" onClick={() => setCsvOpen(true)} variant="outline"
+                            className="rounded-full border-brand-ink text-brand-ink hover:bg-brand-ink hover:text-white">
+                            <UploadSimple size={16} className="mr-1.5" /> Import CSV
+                        </Button>
+                        <Button data-testid="add-flat-btn" onClick={openCreate} className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white active:scale-[0.98]">
+                            <Plus size={16} className="mr-1.5" /> Add flat
+                        </Button>
+                    </div>
                 )}
             />
 
@@ -145,6 +153,16 @@ export default function Flats() {
                     </form>
                 </DialogContent>
             </Dialog>
+
+            <CsvImport
+                open={csvOpen}
+                onOpenChange={setCsvOpen}
+                endpoint="/flats/import-csv"
+                title="Import flats"
+                columns="block, number, floor, bhk, occupancy"
+                template={`block,number,floor,bhk,occupancy\nA,101,1,2BHK,owner\nA,102,1,2BHK,tenant\nA,103,1,3BHK,vacant\n`}
+                onDone={load}
+            />
         </div>
     );
 }
