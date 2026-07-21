@@ -44,6 +44,18 @@ Society Facility Management app for both committee members and residents. Commit
 - Digest content: collection %, resolved complaints, upcoming bookings (next 30 days), notices posted in the month.
 - Admin UI on the Notices page to preview + send on demand, with history of past sends.
 
+### 2026-02-21 (Iteration 5)
+- **Society settings singleton**: `GET/PATCH /api/society` — admin sets society name, city, address, contacts.
+- Society name displayed everywhere: sidebar header, top header overline, Society Settings dialog (accessed from sidebar for admin).
+- **Member directory** (`/app/directory`) — visible to all authenticated users:
+  - Committee cards at top with clickable email/phone (residents know who to contact)
+  - Searchable table of all members with role/flat/email/phone
+- **Flats page overhauled**:
+  - `GET /api/flats/summary` powers 5 StatCards: total, occupied, vacant, owner-occupied, tenant-occupied
+  - Block filter pills + occupancy filter pills
+  - Flats grouped into per-block sections
+- **Complaint UX**: complainer sees a "You'll be notified by email on status changes" banner + a prominent status chip on every card. Email notification on status change already wired.
+
 ## Prioritized Backlog
 ### P1 (Next iteration)
 - Payment gateway (Stripe / Razorpay)
