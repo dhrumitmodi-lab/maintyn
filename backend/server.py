@@ -1,74 +1,707 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+import os
+import uuid
+import logging
+import bcrypt
+import jwt
+import requests
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List
 
-# Create the main app without a prefix
-app = FastAPI()
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Form, Header, Query
+from fastapi.responses import Response as FastAPIResponse
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, EmailStr, Field
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+# ---------- Config ----------
+MONGO_URL = os.environ['MONGO_URL']
+DB_NAME = os.environ['DB_NAME']
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALGORITHM = "HS256"
+EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
+APP_NAME = os.environ.get('APP_NAME', 'maintyn')
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+app = FastAPI(title="Maintyn API")
+api = APIRouter(prefix="/api")
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("maintyn")
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
+# ---------- Storage ----------
+_storage_key = None
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+def init_storage():
+    global _storage_key
+    if _storage_key:
+        return _storage_key
+    if not EMERGENT_LLM_KEY:
+        logger.warning("EMERGENT_LLM_KEY not set - uploads will fail")
+        return None
+    try:
+        r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
+        r.raise_for_status()
+        _storage_key = r.json()["storage_key"]
+        return _storage_key
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+        return None
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    if not key:
+        raise HTTPException(500, "Storage unavailable")
+    r = requests.put(f"{STORAGE_URL}/objects/{path}",
+                     headers={"X-Storage-Key": key, "Content-Type": content_type},
+                     data=data, timeout=120)
+    r.raise_for_status()
+    return r.json()
 
-# Include the router in the main app
-app.include_router(api_router)
+def get_object(path: str):
+    key = init_storage()
+    if not key:
+        raise HTTPException(500, "Storage unavailable")
+    r = requests.get(f"{STORAGE_URL}/objects/{path}",
+                     headers={"X-Storage-Key": key}, timeout=60)
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
+# ---------- Password / JWT ----------
+def hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(pw: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), hashed.encode())
+    except Exception:
+        return False
+
+def create_access_token(user_id: str, email: str, role: str) -> str:
+    payload = {"sub": user_id, "email": email, "role": role,
+               "exp": datetime.now(timezone.utc) + timedelta(hours=12), "type": "access"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def create_refresh_token(user_id: str) -> str:
+    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def set_auth_cookies(resp: Response, access: str, refresh: str):
+    resp.set_cookie("access_token", access, httponly=True, secure=True, samesite="none", max_age=43200, path="/")
+    resp.set_cookie("refresh_token", refresh, httponly=True, secure=True, samesite="none", max_age=604800, path="/")
+
+def clear_auth_cookies(resp: Response):
+    resp.delete_cookie("access_token", path="/")
+    resp.delete_cookie("refresh_token", path="/")
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(401, "Invalid token type")
+        user = await db.users.find_one({"id": payload["sub"]})
+        if not user:
+            raise HTTPException(401, "User not found")
+        user.pop("_id", None)
+        user.pop("password_hash", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(401, "Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid token")
+
+def require_roles(*roles):
+    async def checker(user: dict = Depends(get_current_user)):
+        if user["role"] not in roles:
+            raise HTTPException(403, "Insufficient permissions")
+        return user
+    return checker
+
+require_staff = require_roles("admin", "committee")
+require_admin = require_roles("admin")
+
+# ---------- Models ----------
+class RegisterIn(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: str
+    phone: Optional[str] = None
+
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    name: str
+    phone: Optional[str] = None
+    role: str = "resident"  # admin, committee, resident
+    flat_id: Optional[str] = None
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    flat_id: Optional[str] = None
+    password: Optional[str] = None
+
+class FlatIn(BaseModel):
+    block: str
+    number: str
+    floor: Optional[str] = None
+    bhk: Optional[str] = None
+    owner_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    occupancy: str = "vacant"  # owner, tenant, vacant
+
+class InvoiceIn(BaseModel):
+    flat_id: str
+    amount: float
+    description: str
+    month: str  # e.g. "2026-02"
+    due_date: str  # ISO date
+
+class InvoicePay(BaseModel):
+    method: Optional[str] = "manual"
+    note: Optional[str] = None
+
+class ExpenseIn(BaseModel):
+    title: str
+    amount: float
+    category: str
+    date: str  # ISO
+    description: Optional[str] = None
+    receipt_file_id: Optional[str] = None
+
+class ComplaintIn(BaseModel):
+    title: str
+    description: str
+    category: str = "general"  # plumbing, electrical, security, cleanliness, general
+
+class ComplaintUpdate(BaseModel):
+    status: Optional[str] = None  # open, in_progress, resolved
+    resolution_note: Optional[str] = None
+
+class AnnouncementIn(BaseModel):
+    title: str
+    content: str
+    category: str = "general"  # notice, event, maintenance, general
+
+class VisitorIn(BaseModel):
+    name: str
+    phone: Optional[str] = None
+    purpose: str
+    flat_id: str
+    vehicle_no: Optional[str] = None
+
+# ---------- Helpers ----------
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def clean(doc: dict) -> dict:
+    if not doc:
+        return doc
+    doc.pop("_id", None)
+    doc.pop("password_hash", None)
+    return doc
+
+def new_id():
+    return str(uuid.uuid4())
+
+async def enrich_user_flat(u: dict):
+    if u.get("flat_id"):
+        f = await db.flats.find_one({"id": u["flat_id"]}, {"_id": 0})
+        u["flat"] = f
+    return u
+
+# ---------- Auth ----------
+@api.post("/auth/register")
+async def register(data: RegisterIn, response: Response):
+    email = data.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    user = {
+        "id": new_id(),
+        "email": email,
+        "password_hash": hash_password(data.password),
+        "name": data.name,
+        "phone": data.phone,
+        "role": "resident",
+        "flat_id": None,
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(user)
+    at = create_access_token(user["id"], email, "resident")
+    rt = create_refresh_token(user["id"])
+    set_auth_cookies(response, at, rt)
+    return {**clean(user), "access_token": at}
+
+@api.post("/auth/login")
+async def login(data: LoginIn, response: Response):
+    email = data.email.lower()
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(data.password, user["password_hash"]):
+        raise HTTPException(401, "Invalid email or password")
+    at = create_access_token(user["id"], email, user["role"])
+    rt = create_refresh_token(user["id"])
+    set_auth_cookies(response, at, rt)
+    return {**clean(user), "access_token": at}
+
+@api.post("/auth/logout")
+async def logout(response: Response, _: dict = Depends(get_current_user)):
+    clear_auth_cookies(response)
+    return {"ok": True}
+
+@api.get("/auth/me")
+async def me(user: dict = Depends(get_current_user)):
+    return await enrich_user_flat(user)
+
+# ---------- Users ----------
+@api.get("/users")
+async def list_users(user: dict = Depends(require_staff)):
+    docs = await db.users.find({}, {"password_hash": 0, "_id": 0}).to_list(1000)
+    for d in docs:
+        await enrich_user_flat(d)
+    return docs
+
+@api.post("/users")
+async def create_user(data: UserCreate, _: dict = Depends(require_admin)):
+    email = data.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    if data.role not in ("admin", "committee", "resident"):
+        raise HTTPException(400, "Invalid role")
+    u = {
+        "id": new_id(),
+        "email": email,
+        "password_hash": hash_password(data.password),
+        "name": data.name,
+        "phone": data.phone,
+        "role": data.role,
+        "flat_id": data.flat_id,
+        "created_at": now_iso(),
+    }
+    await db.users.insert_one(u)
+    return clean(u)
+
+@api.patch("/users/{uid}")
+async def update_user(uid: str, data: UserUpdate, _: dict = Depends(require_admin)):
+    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    if "password" in upd:
+        upd["password_hash"] = hash_password(upd.pop("password"))
+    if "role" in upd and upd["role"] not in ("admin", "committee", "resident"):
+        raise HTTPException(400, "Invalid role")
+    await db.users.update_one({"id": uid}, {"$set": upd})
+    doc = await db.users.find_one({"id": uid}, {"password_hash": 0, "_id": 0})
+    if not doc:
+        raise HTTPException(404, "User not found")
+    return doc
+
+@api.delete("/users/{uid}")
+async def delete_user(uid: str, current: dict = Depends(require_admin)):
+    if uid == current["id"]:
+        raise HTTPException(400, "Cannot delete yourself")
+    res = await db.users.delete_one({"id": uid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "User not found")
+    return {"ok": True}
+
+# ---------- Flats ----------
+@api.get("/flats")
+async def list_flats(user: dict = Depends(get_current_user)):
+    docs = await db.flats.find({}, {"_id": 0}).to_list(2000)
+    # Enrich with residents
+    for f in docs:
+        residents = await db.users.find({"flat_id": f["id"]}, {"password_hash": 0, "_id": 0}).to_list(50)
+        f["residents"] = residents
+    return docs
+
+@api.post("/flats")
+async def create_flat(data: FlatIn, _: dict = Depends(require_staff)):
+    f = {"id": new_id(), **data.model_dump(), "created_at": now_iso()}
+    await db.flats.insert_one(f)
+    f.pop("_id", None)
+    return f
+
+@api.patch("/flats/{fid}")
+async def update_flat(fid: str, data: FlatIn, _: dict = Depends(require_staff)):
+    upd = data.model_dump()
+    await db.flats.update_one({"id": fid}, {"$set": upd})
+    doc = await db.flats.find_one({"id": fid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Flat not found")
+    return doc
+
+@api.delete("/flats/{fid}")
+async def delete_flat(fid: str, _: dict = Depends(require_admin)):
+    res = await db.flats.delete_one({"id": fid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Flat not found")
+    # Unlink from users
+    await db.users.update_many({"flat_id": fid}, {"$set": {"flat_id": None}})
+    return {"ok": True}
+
+# ---------- Invoices ----------
+@api.get("/invoices")
+async def list_invoices(user: dict = Depends(get_current_user)):
+    query = {}
+    if user["role"] == "resident":
+        # only invoices for their flat
+        if not user.get("flat_id"):
+            return []
+        query["flat_id"] = user["flat_id"]
+    docs = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    for d in docs:
+        f = await db.flats.find_one({"id": d["flat_id"]}, {"_id": 0})
+        d["flat"] = f
+    return docs
+
+@api.post("/invoices")
+async def create_invoice(data: InvoiceIn, user: dict = Depends(require_staff)):
+    flat = await db.flats.find_one({"id": data.flat_id})
+    if not flat:
+        raise HTTPException(404, "Flat not found")
+    inv = {
+        "id": new_id(),
+        **data.model_dump(),
+        "status": "unpaid",
+        "paid_at": None,
+        "payment_method": None,
+        "created_by": user["id"],
+        "created_at": now_iso(),
+    }
+    await db.invoices.insert_one(inv)
+    inv.pop("_id", None)
+    return inv
+
+@api.post("/invoices/bulk")
+async def bulk_create_invoices(payload: dict, user: dict = Depends(require_staff)):
+    """Create invoices for all flats. payload: {amount, description, month, due_date}"""
+    amount = payload["amount"]
+    description = payload["description"]
+    month = payload["month"]
+    due_date = payload["due_date"]
+    flats = await db.flats.find({}).to_list(2000)
+    created = []
+    for f in flats:
+        inv = {
+            "id": new_id(),
+            "flat_id": f["id"],
+            "amount": amount,
+            "description": description,
+            "month": month,
+            "due_date": due_date,
+            "status": "unpaid",
+            "paid_at": None,
+            "payment_method": None,
+            "created_by": user["id"],
+            "created_at": now_iso(),
+        }
+        await db.invoices.insert_one(inv)
+        inv.pop("_id", None)
+        created.append(inv)
+    return {"count": len(created)}
+
+@api.post("/invoices/{iid}/pay")
+async def mark_paid(iid: str, data: InvoicePay, user: dict = Depends(get_current_user)):
+    inv = await db.invoices.find_one({"id": iid})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    if user["role"] == "resident" and inv["flat_id"] != user.get("flat_id"):
+        raise HTTPException(403, "Not your invoice")
+    await db.invoices.update_one({"id": iid}, {"$set": {
+        "status": "paid",
+        "paid_at": now_iso(),
+        "payment_method": data.method,
+        "payment_note": data.note,
+    }})
+    doc = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    return doc
+
+@api.delete("/invoices/{iid}")
+async def delete_invoice(iid: str, _: dict = Depends(require_staff)):
+    res = await db.invoices.delete_one({"id": iid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Invoice not found")
+    return {"ok": True}
+
+# ---------- Files ----------
+@api.post("/files/upload")
+async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "bin"
+    fid = new_id()
+    path = f"{APP_NAME}/uploads/{user['id']}/{fid}.{ext}"
+    data = await file.read()
+    result = put_object(path, data, file.content_type or "application/octet-stream")
+    rec = {
+        "id": fid,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": file.content_type or "application/octet-stream",
+        "size": result.get("size", len(data)),
+        "uploaded_by": user["id"],
+        "is_deleted": False,
+        "created_at": now_iso(),
+    }
+    await db.files.insert_one(rec)
+    rec.pop("_id", None)
+    return rec
+
+@api.get("/files/{fid}/download")
+async def download_file(fid: str, request: Request, auth: Optional[str] = Query(None)):
+    # Auth: cookie or bearer or ?auth=token
+    token = request.cookies.get("access_token")
+    if not token:
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "):
+            token = ah[7:]
+    if not token and auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Not authenticated")
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        raise HTTPException(401, "Invalid token")
+    rec = await db.files.find_one({"id": fid, "is_deleted": False})
+    if not rec:
+        raise HTTPException(404, "File not found")
+    data, ct = get_object(rec["storage_path"])
+    return FastAPIResponse(content=data, media_type=rec.get("content_type", ct))
+
+# ---------- Expenses ----------
+@api.get("/expenses")
+async def list_expenses(user: dict = Depends(get_current_user)):
+    docs = await db.expenses.find({}, {"_id": 0}).sort("date", -1).to_list(2000)
+    return docs
+
+@api.post("/expenses")
+async def create_expense(data: ExpenseIn, user: dict = Depends(require_staff)):
+    exp = {
+        "id": new_id(),
+        **data.model_dump(),
+        "created_by": user["id"],
+        "created_by_name": user["name"],
+        "created_at": now_iso(),
+    }
+    await db.expenses.insert_one(exp)
+    exp.pop("_id", None)
+    return exp
+
+@api.delete("/expenses/{eid}")
+async def delete_expense(eid: str, _: dict = Depends(require_staff)):
+    res = await db.expenses.delete_one({"id": eid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Expense not found")
+    return {"ok": True}
+
+# ---------- Complaints ----------
+@api.get("/complaints")
+async def list_complaints(user: dict = Depends(get_current_user)):
+    query = {} if user["role"] in ("admin", "committee") else {"created_by": user["id"]}
+    docs = await db.complaints.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    return docs
+
+@api.post("/complaints")
+async def create_complaint(data: ComplaintIn, user: dict = Depends(get_current_user)):
+    c = {
+        "id": new_id(),
+        **data.model_dump(),
+        "status": "open",
+        "created_by": user["id"],
+        "created_by_name": user["name"],
+        "flat_id": user.get("flat_id"),
+        "resolution_note": None,
+        "resolved_by": None,
+        "resolved_at": None,
+        "created_at": now_iso(),
+    }
+    await db.complaints.insert_one(c)
+    c.pop("_id", None)
+    return c
+
+@api.patch("/complaints/{cid}")
+async def update_complaint(cid: str, data: ComplaintUpdate, user: dict = Depends(require_staff)):
+    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    if upd.get("status") == "resolved":
+        upd["resolved_by"] = user["id"]
+        upd["resolved_at"] = now_iso()
+    await db.complaints.update_one({"id": cid}, {"$set": upd})
+    doc = await db.complaints.find_one({"id": cid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Complaint not found")
+    return doc
+
+# ---------- Announcements ----------
+@api.get("/announcements")
+async def list_announcements(_: dict = Depends(get_current_user)):
+    docs = await db.announcements.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api.post("/announcements")
+async def create_announcement(data: AnnouncementIn, user: dict = Depends(require_staff)):
+    a = {
+        "id": new_id(),
+        **data.model_dump(),
+        "created_by": user["id"],
+        "created_by_name": user["name"],
+        "created_at": now_iso(),
+    }
+    await db.announcements.insert_one(a)
+    a.pop("_id", None)
+    return a
+
+@api.delete("/announcements/{aid}")
+async def delete_announcement(aid: str, _: dict = Depends(require_staff)):
+    res = await db.announcements.delete_one({"id": aid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Announcement not found")
+    return {"ok": True}
+
+# ---------- Visitors ----------
+@api.get("/visitors")
+async def list_visitors(user: dict = Depends(get_current_user)):
+    query = {}
+    if user["role"] == "resident":
+        if not user.get("flat_id"):
+            return []
+        query["flat_id"] = user["flat_id"]
+    docs = await db.visitors.find(query, {"_id": 0}).sort("check_in", -1).to_list(2000)
+    for d in docs:
+        f = await db.flats.find_one({"id": d["flat_id"]}, {"_id": 0})
+        d["flat"] = f
+    return docs
+
+@api.post("/visitors")
+async def create_visitor(data: VisitorIn, user: dict = Depends(get_current_user)):
+    v = {
+        "id": new_id(),
+        **data.model_dump(),
+        "check_in": now_iso(),
+        "check_out": None,
+        "logged_by": user["id"],
+    }
+    await db.visitors.insert_one(v)
+    v.pop("_id", None)
+    return v
+
+@api.post("/visitors/{vid}/checkout")
+async def checkout_visitor(vid: str, _: dict = Depends(get_current_user)):
+    await db.visitors.update_one({"id": vid}, {"$set": {"check_out": now_iso()}})
+    doc = await db.visitors.find_one({"id": vid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Visitor not found")
+    return doc
+
+# ---------- Dashboard stats ----------
+@api.get("/stats")
+async def stats(user: dict = Depends(get_current_user)):
+    total_flats = await db.flats.count_documents({})
+    total_users = await db.users.count_documents({})
+    total_residents = await db.users.count_documents({"role": "resident"})
+    unpaid = await db.invoices.count_documents({"status": "unpaid"})
+    paid = await db.invoices.count_documents({"status": "paid"})
+    open_complaints = await db.complaints.count_documents({"status": "open"})
+    inprogress_complaints = await db.complaints.count_documents({"status": "in_progress"})
+    resolved_complaints = await db.complaints.count_documents({"status": "resolved"})
+
+    # Sum unpaid amount
+    total_collected = 0.0
+    total_pending = 0.0
+    async for inv in db.invoices.find({}):
+        if inv["status"] == "paid":
+            total_collected += float(inv["amount"])
+        else:
+            total_pending += float(inv["amount"])
+    total_expenses = 0.0
+    async for e in db.expenses.find({}):
+        total_expenses += float(e["amount"])
+
+    active_visitors = await db.visitors.count_documents({"check_out": None})
+    announcements_count = await db.announcements.count_documents({})
+
+    resident_data = {}
+    if user["role"] == "resident" and user.get("flat_id"):
+        my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
+        my_pending_amount = 0.0
+        async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}):
+            my_pending_amount += float(inv["amount"])
+        resident_data = {"my_unpaid_count": my_unpaid, "my_pending_amount": my_pending_amount}
+
+    return {
+        "total_flats": total_flats,
+        "total_users": total_users,
+        "total_residents": total_residents,
+        "invoices_unpaid": unpaid,
+        "invoices_paid": paid,
+        "total_collected": total_collected,
+        "total_pending": total_pending,
+        "total_expenses": total_expenses,
+        "complaints_open": open_complaints,
+        "complaints_inprogress": inprogress_complaints,
+        "complaints_resolved": resolved_complaints,
+        "active_visitors": active_visitors,
+        "announcements_count": announcements_count,
+        **resident_data,
+    }
+
+# ---------- Startup ----------
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.flats.create_index("id", unique=True)
+    await db.invoices.create_index("id", unique=True)
+    await db.invoices.create_index("flat_id")
+    await db.expenses.create_index("id", unique=True)
+    await db.complaints.create_index("id", unique=True)
+    await db.announcements.create_index("id", unique=True)
+    await db.visitors.create_index("id", unique=True)
+    await db.files.create_index("id", unique=True)
+
+    # Seed admin
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()
+    admin_pw = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        await db.users.insert_one({
+            "id": new_id(),
+            "email": admin_email,
+            "password_hash": hash_password(admin_pw),
+            "name": "Admin",
+            "phone": None,
+            "role": "admin",
+            "flat_id": None,
+            "created_at": now_iso(),
+        })
+        logger.info(f"Seeded admin user: {admin_email}")
+    elif not verify_password(admin_pw, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
+
+    init_storage()
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
+# Include router & CORS
+app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -76,14 +709,3 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
