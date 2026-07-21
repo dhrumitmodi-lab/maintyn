@@ -24,32 +24,30 @@ Society Facility Management app for both committee members and residents. Commit
 
 ## What's Implemented
 ### 2026-02-21 (Initial MVP)
-- JWT auth: /login, /register (self-signup as resident), /logout, /me
-- Admin seeded on startup (admin@maintyn.app / Admin@12345)
-- Users, Flats, Invoices, Expenses, Complaints, Announcements, Visitors — all CRUD
-- Invoices: bulk-for-all-flats, mark paid, filter by status
-- Expenses: with receipt upload via Emergent object storage
-- Complaints: Kanban board with status transitions
-- Role-based dashboard + landing page
+- JWT auth, all CRUD modules (Users/Flats/Invoices/Expenses/Complaints/Announcements/Visitors), role-based dashboard, landing.
 
 ### 2026-02-21 (Iteration 2)
-- Password reset via Resend email: /api/auth/forgot-password, /api/auth/reset-password
-- Frontend pages /forgot-password and /reset-password
-- Email notifications on: password reset request, invoice raised (single & bulk), complaint status change
-- CSV bulk import for flats: POST /api/flats/import-csv
-- CSV bulk import for residents: POST /api/users/import-csv (links to flat via block+flat_number)
-- Reusable CsvImport dialog with template download
+- Password reset via Resend, email notifications on invoice/complaint updates.
+- CSV bulk import for flats and residents.
+
+### 2026-02-21 (Iteration 3)
+- **Amenity booking module**: staff create amenities (name/hours/slot duration/price/active toggle).
+- Residents pick date on calendar → see hourly slot grid with booked/free → book. Conflict-prevented.
+- `POST /api/bookings` with server-side overlap detection, hours validation, past-date protection.
+- Cancellation flow: owner or staff can cancel. Deleting an amenity auto-cancels future bookings.
+- Booking confirmation + cancellation emails via Resend.
+- Dashboard extended with bookings_today / bookings_upcoming / amenities_active / my_upcoming_bookings.
 
 ## Prioritized Backlog
 ### P1 (Next iteration)
-- Payment gateway integration (Stripe / Razorpay)
-- Amenity booking module (clubhouse, community hall)
+- Payment gateway (Stripe / Razorpay) — collect maintenance & amenity fees online
+- Monthly community digest email (auto on 1st of each month)
 
 ### P2 (Later)
-- Rich resident profile (vehicle, family members)
-- Polls / voting for AGM
-- Society-level branding & multi-society tenancy
-- Analytics: month-over-month collection rate, expense category breakdown
+- Polls / voting for AGM decisions
+- Multi-society tenancy (SaaS mode)
+- Analytics: collection trends, expense breakdowns
+- Amenity booking rules (max bookings/resident/week, booking window)
 
 ## Test Credentials
 See `/app/memory/test_credentials.md`

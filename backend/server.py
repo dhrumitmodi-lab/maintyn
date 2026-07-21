@@ -1065,13 +1065,16 @@ async def stats(user: dict = Depends(get_current_user)):
     amenities_active = await db.amenities.count_documents({"is_active": True})
 
     resident_data = {}
-    if user["role"] == "resident" and user.get("flat_id"):
-        my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
-        my_pending_amount = 0.0
-        async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}):
-            my_pending_amount += float(inv["amount"])
+    if user["role"] == "resident":
         my_bookings = await db.bookings.count_documents({"user_id": user["id"], "date": {"$gte": today_iso}, "status": {"$ne": "cancelled"}})
-        resident_data = {"my_unpaid_count": my_unpaid, "my_pending_amount": my_pending_amount, "my_upcoming_bookings": my_bookings}
+        resident_data["my_upcoming_bookings"] = my_bookings
+        if user.get("flat_id"):
+            my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
+            my_pending_amount = 0.0
+            async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}):
+                my_pending_amount += float(inv["amount"])
+            resident_data["my_unpaid_count"] = my_unpaid
+            resident_data["my_pending_amount"] = my_pending_amount
 
     return {
         "total_flats": total_flats,
