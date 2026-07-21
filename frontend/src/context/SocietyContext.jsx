@@ -18,7 +18,7 @@ export function SocietyProvider({ children }) {
     useEffect(() => {
         if (user) refresh();
         else setSociety(null);
-    }, [user?.id]);
+    }, [user, refresh]);
 
     return (
         <SocietyContext.Provider value={{ society, refresh, setSociety }}>
