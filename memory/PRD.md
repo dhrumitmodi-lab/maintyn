@@ -81,6 +81,17 @@ Society Facility Management app for both committee members and residents. Commit
 - **JWT enhanced**: `kind` (master|society) + `society_id` claim; `get_current_user` transparently sets the tenant DB context.
 - **Suspended societies block logins** (403).
 
+### 2026-07-21 (Iteration 10 · M-416 feature batch)
+- **Staff & Vendor Directory** (`/app/staff`): CRUD for maintenance staff/vendors — name, role_label (e.g. "Plumber"), category (plumbing/electrical/security/cleanliness/parking/amenities/lift/general), phone, email, vendor_org, is_active toggle. Endpoints: `GET/POST /api/staff`, `PATCH/DELETE /api/staff/{id}`. Deleting a staff unassigns any complaints referring to them.
+- **Auto-assign complaints on create**: `POST /api/complaints` now finds the first active staff with a matching category and sets `assigned_to` + `assigned_at`. Response includes enriched `assigned_staff` block (name/phone/email/vendor_org).
+- **Manual reassignment**: `PATCH /api/complaints/{id}` accepts `assigned_to` (staff id) or empty string to clear. Kanban card exposes a staff picker (`complaint-assign-<id>`) alongside the status select for admin/committee.
+- **Resident sees who's on it**: complaint card renders assigned staff panel with click-to-call phone & click-to-email link.
+- **Payment receipt email**: marking an invoice paid (`POST /api/invoices/{id}/pay`) now fires a background Resend email to every resident on that flat containing receipt number, amount, description, method, paid date, society name. Only triggers on the paid transition (not on re-marking).
+- **Invoice dashboard** (`GET /api/invoices/stats`, admin/committee only): totals for raised/received/pending, collection %, monthly trend (last 6 months raised vs received), and a **defaulter list** — flats whose oldest unpaid invoice is over 90 days old, with residents, unpaid count and months pending. Rendered as StatCards + bar chart + table on `/app/invoices`.
+- **Expense dashboard** (`GET /api/expenses/stats`, admin/committee only): 12-month income (paid invoices) vs spent (expenses) series, 3-month projection based on non-zero last-3-month average, category breakdown, totals + net. Rendered on `/app/expenses` as StatCards + bar chart (solid bars for actual, dashed for projected) + category progress bars.
+- **Sidebar**: added "Staff & vendors" nav (visible to all roles — residents see the roster read-only via UI role gating).
+- **DB indexes**: `staff` collection indexed on `id` (unique) and `category`, provisioned for both Default and new societies.
+
 ## Notes
 - **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
 - **Multi-society setup**: fully done via master console — no need for separate deployments.
@@ -88,11 +99,14 @@ Society Facility Management app for both committee members and residents. Commit
 ## Prioritized Backlog
 ### P1 (Next iteration)
 - Payment gateway (Stripe / Razorpay) for online invoice payments
+- WhatsApp receipts (Twilio) — deferred from M-416 (email-only shipped)
+- Partial PATCH for `/api/staff/{id}` (exclude_unset)
+- Auto-assign tie-breaker (least-loaded / round-robin) when multiple staff share a category
 
 ### P2 (Later)
 - Polls / voting for AGM decisions
-- Multi-society tenancy (SaaS mode)
-- Analytics: collection trends, expense breakdowns
+- Refactor `server.py` (~2300 lines) into APIRouter modules (staff.py, invoices.py, complaints.py, expenses.py)
+- Defaulter dunning: auto-email defaulter reminder from the dashboard
 - Amenity booking rules (max bookings/resident/week, booking window)
 
 ## Test Credentials
@@ -102,10 +116,12 @@ See `/app/memory/test_credentials.md`
 Auth: `/auth/{login,register,logout,me}`
 Users: `/users` (GET, POST, PATCH/{id}, DELETE/{id})
 Flats: `/flats` (GET, POST, PATCH/{id}, DELETE/{id})
-Invoices: `/invoices`, `/invoices/bulk`, `/invoices/{id}/pay`, DELETE `/invoices/{id}`
-Expenses: `/expenses` (GET, POST, DELETE/{id})
+Invoices: `/invoices`, `/invoices/bulk`, `/invoices/{id}/pay`, `/invoices/stats`, DELETE `/invoices/{id}`
+Expenses: `/expenses` (GET, POST, DELETE/{id}), `/expenses/stats`
 Files: `/files/upload`, `/files/{id}/download`
 Complaints: `/complaints` (GET, POST, PATCH/{id})
+Staff: `/staff` (GET, POST), `/staff/{id}` (PATCH, DELETE)
 Announcements: `/announcements` (GET, POST, DELETE/{id})
 Visitors: `/visitors` (GET, POST), `/visitors/{id}/checkout`
 Stats: `/stats`
+Master: `/master/{session,societies,users,rollup}`, `/master/societies/{id}/{status,impersonate}`
