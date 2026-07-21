@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { SocietyProvider } from "@/context/SocietyContext";
 import Layout from "@/components/Layout";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
@@ -17,6 +18,7 @@ import Complaints from "@/pages/Complaints";
 import Announcements from "@/pages/Announcements";
 import Visitors from "@/pages/Visitors";
 import Amenities from "@/pages/Amenities";
+import Directory from "@/pages/Directory";
 import "@/App.css";
 
 function Protected({ children, roles }) {
@@ -38,28 +40,31 @@ function Protected({ children, roles }) {
 function App() {
     return (
         <AuthProvider>
-            <BrowserRouter>
-                <Toaster position="top-right" />
-                <Routes>
-                    <Route path="/" element={<Landing />} />
-                    <Route path="/login" element={<Login />} />
-                    <Route path="/register" element={<Register />} />
-                    <Route path="/forgot-password" element={<ForgotPassword />} />
-                    <Route path="/reset-password" element={<ResetPassword />} />
-                    <Route path="/app" element={<Protected><Layout /></Protected>}>
-                        <Route index element={<Dashboard />} />
-                        <Route path="users" element={<Protected roles={["admin", "committee"]}><Users /></Protected>} />
-                        <Route path="flats" element={<Flats />} />
-                        <Route path="invoices" element={<Invoices />} />
-                        <Route path="expenses" element={<Expenses />} />
-                        <Route path="complaints" element={<Complaints />} />
-                        <Route path="announcements" element={<Announcements />} />
-                        <Route path="visitors" element={<Visitors />} />
-                        <Route path="amenities" element={<Amenities />} />
-                    </Route>
-                    <Route path="*" element={<Navigate to="/" replace />} />
-                </Routes>
-            </BrowserRouter>
+            <SocietyProvider>
+                <BrowserRouter>
+                    <Toaster position="top-right" />
+                    <Routes>
+                        <Route path="/" element={<Landing />} />
+                        <Route path="/login" element={<Login />} />
+                        <Route path="/register" element={<Register />} />
+                        <Route path="/forgot-password" element={<ForgotPassword />} />
+                        <Route path="/reset-password" element={<ResetPassword />} />
+                        <Route path="/app" element={<Protected><Layout /></Protected>}>
+                            <Route index element={<Dashboard />} />
+                            <Route path="users" element={<Protected roles={["admin", "committee"]}><Users /></Protected>} />
+                            <Route path="directory" element={<Directory />} />
+                            <Route path="flats" element={<Flats />} />
+                            <Route path="invoices" element={<Invoices />} />
+                            <Route path="expenses" element={<Expenses />} />
+                            <Route path="complaints" element={<Complaints />} />
+                            <Route path="announcements" element={<Announcements />} />
+                            <Route path="visitors" element={<Visitors />} />
+                            <Route path="amenities" element={<Amenities />} />
+                        </Route>
+                        <Route path="*" element={<Navigate to="/" replace />} />
+                    </Routes>
+                </BrowserRouter>
+            </SocietyProvider>
         </AuthProvider>
     );
 }

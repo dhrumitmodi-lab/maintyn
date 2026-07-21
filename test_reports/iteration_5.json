@@ -1,0 +1,46 @@
+{
+  "summary": "Iteration 5 end-to-end verification of society settings, directory, committee, flats summary, and complaint email notification. Backend: 10/10 pytest cases pass (GET/PATCH /api/society RBAC, GET /api/directory, GET /api/committee, GET /api/flats/summary shape+math, complaint PATCH triggers 'Complaint update' email log). Frontend: sidebar-society-name + header-society-name render 'Maintyn Society'; admin sees sidebar-society-settings and Directory nav; Society Settings dialog pre-fills, saves to 'Green Valley Residency', sidebar updates immediately via SocietyContext refresh, then restored to 'Maintyn Society'. /app/directory renders 3 committee cards and 23 directory rows; directory-search filters correctly ('admin' -> 1 row). /app/flats renders block-filter-all, occupancy-filter-all, 8 block-filter buttons, 7 block-section groups, all 5 StatCard labels visible; clicking block-filter-A narrows to 1 section. /app/complaints: banner correctly hidden for admin (residents-only), complaint-card and complaint-status-chip data-testids resolve after fixing Chip prop forwarding. Society name restored to default.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "PATCH /api/society", "issue": "contact_email validator rejects .test / .local TLDs (pydantic email-validator strictness). Consider EmailStr with check_deliverability=False for internal fields, or document allowed TLDs."},
+      {"endpoint": "GET /api/directory", "issue": "Endpoint exposes email + phone of all users to any authenticated user including residents. Consider privacy toggle (opt-out) or masking phone for non-committee viewers."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Shared.jsx Chip", "issue": "Chip did not forward data-testid (or any extra props) — status-chip test hooks were invisible to automation. FIXED by spreading ...rest onto the span.", "selector": "[data-testid^='complaint-status-chip-']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Society Settings dialog", "issues": ["Radix DialogContent missing aria-describedby (React console warning; existing app-wide a11y issue, non-blocking)."]},
+      {"screen": "Sidebar society header", "issues": ["Sidebar sub-line 'ON MAINTYN · COMMUNITY …' is truncated / ellipsized on 260px sidebar — the '…' cuts mid-word rather than after a whole token. Cosmetic."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_society_directory_flats.py",
+    "/app/test_reports/pytest/it5_results.xml"
+  ],
+  "action_items": [
+    "Ship the Chip data-testid pass-through fix (already applied in /app/frontend/src/components/Shared.jsx) — no further action needed unless main agent prefers a different pattern.",
+    "Consider masking phone/email in /api/directory for resident viewers (privacy).",
+    "Consider relaxing email validator for society.contact_email or documenting the .test/.local restriction."
+  ],
+  "critical_code_review_comments": [
+    "Chip component in Shared.jsx did NOT forward props — any consumer passing className/aria/data-testid was silently dropped. Fixed via {...rest} spread on the span. Audit other Shared.jsx primitives (EmptyState, StatCard, PageHeader) for the same anti-pattern.",
+    "server.py is now ~1454 lines — over the 700-line guideline. Split into routers/modules (society.py, directory.py, complaints.py, flats.py) for maintainability.",
+    "/api/directory has no pagination — will be slow at scale (>1000 users). Add limit/offset or search-on-server.",
+    "SocietyContext refetches on every user change; that is fine, but if PATCH /api/society response is used directly the sidebar could update without a second GET — currently there is a 2-request flash on save. Optimize by consuming PATCH response.",
+    "Complaint status-change email is fire-and-forget within the request; if SMTP is slow, PATCH latency spikes. Move to BackgroundTasks or asyncio.create_task."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_society_directory_flats.py (new)",
+    "/app/frontend/src/components/Shared.jsx (Chip now forwards props including data-testid)"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% (all data-testids resolve after Chip fix; flows verified)"},
+  "test_credentials": "admin@maintyn.app / Admin@12345",
+  "seed_data_creation": "Registered one throwaway resident test_res_it5_<ts>_<pid>@example.com for resident-side RBAC assertions. Created a fallback complaint 'TEST it5 notify' via admin when no non-admin complaint existed. Society name PATCHed to 'Green Valley Residency' and restored to 'Maintyn Society' at the end of the test.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Society doc is singleton in db.society with id='singleton', current name 'Maintyn Society'. Directory endpoint is public to any authenticated user. Chip component (Shared.jsx) now forwards props — reuse this for any future test hooks. Pydantic email-validator disallows .test TLD, use .example.com for test emails. For xdist-parallel tests that register users, seed emails with pid+ms to avoid dup collisions."
+}

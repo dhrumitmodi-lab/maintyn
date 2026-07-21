@@ -262,6 +262,14 @@ class VisitorIn(BaseModel):
     flat_id: str
     vehicle_no: Optional[str] = None
 
+class SocietyIn(BaseModel):
+    name: str = Field(min_length=1)
+    address: Optional[str] = None
+    city: Optional[str] = None
+    established_year: Optional[int] = None
+    contact_email: Optional[EmailStr] = None
+    contact_phone: Optional[str] = None
+
 class AmenityIn(BaseModel):
     name: str
     description: Optional[str] = None
@@ -341,6 +349,73 @@ async def logout(response: Response, _: dict = Depends(get_current_user)):
 @api.get("/auth/me")
 async def me(user: dict = Depends(get_current_user)):
     return await enrich_user_flat(user)
+
+# ---------- Society settings ----------
+SOCIETY_ID = "singleton"
+
+async def _get_society():
+    doc = await db.society.find_one({"id": SOCIETY_ID}, {"_id": 0})
+    if not doc:
+        doc = {
+            "id": SOCIETY_ID,
+            "name": APP_NAME.capitalize() + " Society",
+            "address": None,
+            "city": None,
+            "established_year": None,
+            "contact_email": None,
+            "contact_phone": None,
+            "is_setup": False,
+            "created_at": now_iso(),
+        }
+        await db.society.insert_one(doc)
+        doc.pop("_id", None)
+    return doc
+
+@api.get("/society")
+async def get_society(_: dict = Depends(get_current_user)):
+    return await _get_society()
+
+@api.patch("/society")
+async def update_society(data: SocietyIn, _: dict = Depends(require_admin)):
+    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+    upd["is_setup"] = True
+    upd["updated_at"] = now_iso()
+    await db.society.update_one({"id": SOCIETY_ID}, {"$set": upd}, upsert=True)
+    return await _get_society()
+
+# ---------- Directory ----------
+@api.get("/directory")
+async def directory(_: dict = Depends(get_current_user)):
+    """All residents can see everyone's name + role + flat (contact info visible to committee/admin only via /committee)."""
+    docs = await db.users.find({}, {"password_hash": 0, "_id": 0}).to_list(2000)
+    out = []
+    for u in docs:
+        flat = None
+        if u.get("flat_id"):
+            flat = await db.flats.find_one({"id": u["flat_id"]}, {"_id": 0})
+        out.append({
+            "id": u["id"],
+            "name": u["name"],
+            "role": u["role"],
+            "flat_label": f"{flat['block']}-{flat['number']}" if flat else None,
+            "email": u["email"],
+            "phone": u.get("phone"),
+        })
+    out.sort(key=lambda x: (x["role"] != "admin", x["role"] != "committee", x["name"].lower()))
+    return out
+
+@api.get("/committee")
+async def committee(_: dict = Depends(get_current_user)):
+    """Public-to-residents list of admin+committee members with contact info."""
+    docs = await db.users.find({"role": {"$in": ["admin", "committee"]}}, {"password_hash": 0, "_id": 0}).to_list(200)
+    for u in docs:
+        u["flat_label"] = None
+        if u.get("flat_id"):
+            f = await db.flats.find_one({"id": u["flat_id"]}, {"_id": 0})
+            if f:
+                u["flat_label"] = f"{f['block']}-{f['number']}"
+    docs.sort(key=lambda u: (u["role"] != "admin", u["name"].lower()))
+    return docs
 
 # ---------- Password Reset ----------
 class ForgotIn(BaseModel):
@@ -490,12 +565,33 @@ async def import_users_csv(file: UploadFile = File(...), _: dict = Depends(requi
 # ---------- Flats ----------
 @api.get("/flats")
 async def list_flats(user: dict = Depends(get_current_user)):
-    docs = await db.flats.find({}, {"_id": 0}).to_list(2000)
+    docs = await db.flats.find({}, {"_id": 0}).sort([("block", 1), ("number", 1)]).to_list(2000)
     # Enrich with residents
     for f in docs:
         residents = await db.users.find({"flat_id": f["id"]}, {"password_hash": 0, "_id": 0}).to_list(50)
         f["residents"] = residents
     return docs
+
+@api.get("/flats/summary")
+async def flats_summary(_: dict = Depends(get_current_user)):
+    docs = await db.flats.find({}, {"_id": 0}).to_list(2000)
+    total = len(docs)
+    owners = sum(1 for f in docs if f.get("occupancy") == "owner")
+    tenants = sum(1 for f in docs if f.get("occupancy") == "tenant")
+    vacant = sum(1 for f in docs if f.get("occupancy") == "vacant")
+    occupied = owners + tenants
+    blocks = {}
+    for f in docs:
+        b = f.get("block", "—")
+        blocks[b] = blocks.get(b, 0) + 1
+    return {
+        "total": total,
+        "occupied": occupied,
+        "vacant": vacant,
+        "owners": owners,
+        "tenants": tenants,
+        "blocks": [{"block": k, "count": v} for k, v in sorted(blocks.items())],
+    }
 
 @api.post("/flats")
 async def create_flat(data: FlatIn, _: dict = Depends(require_staff)):

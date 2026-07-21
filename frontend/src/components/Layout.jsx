@@ -1,9 +1,11 @@
 import React, { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import { useSociety } from "@/context/SocietyContext";
+import SocietySettingsDialog from "@/components/SocietySettingsDialog";
 import {
     House, Users as UsersIcon, Buildings, Receipt, CurrencyInr,
-    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti
+    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti, AddressBook, Gear
 } from "@phosphor-icons/react";
 import Logo from "@/components/Logo";
 import { Button } from "@/components/ui/button";
@@ -12,6 +14,7 @@ const NAV = [
     { to: "/app", label: "Overview", icon: House, roles: ["admin", "committee", "resident"], end: true, testId: "nav-overview" },
     { to: "/app/flats", label: "Flats", icon: Buildings, roles: ["admin", "committee", "resident"], testId: "nav-flats" },
     { to: "/app/users", label: "Residents", icon: UsersIcon, roles: ["admin", "committee"], testId: "nav-users" },
+    { to: "/app/directory", label: "Directory", icon: AddressBook, roles: ["admin", "committee", "resident"], testId: "nav-directory" },
     { to: "/app/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "committee", "resident"], testId: "nav-invoices" },
     { to: "/app/expenses", label: "Expenses", icon: CurrencyInr, roles: ["admin", "committee", "resident"], testId: "nav-expenses" },
     { to: "/app/complaints", label: "Complaints", icon: ChatCircleDots, roles: ["admin", "committee", "resident"], testId: "nav-complaints" },
@@ -22,9 +25,13 @@ const NAV = [
 
 export default function Layout() {
     const { user, logout } = useAuth();
+    const { society } = useSociety();
     const nav = useNavigate();
     const [mobileOpen, setMobileOpen] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const items = NAV.filter((n) => n.roles.includes(user?.role));
+    const societyName = society?.name || "maintyn";
+    const isAdmin = user?.role === "admin";
 
     return (
         <div className="min-h-screen flex bg-brand-bg">
@@ -42,9 +49,15 @@ export default function Layout() {
                             <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
                             <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
                         </svg>
-                        <span className="font-heading font-bold text-xl tracking-tight text-white">maintyn</span>
+                        <div className="min-w-0 flex-1">
+                            <p className="font-heading font-bold text-lg tracking-tight text-white truncate" data-testid="sidebar-society-name">
+                                {societyName}
+                            </p>
+                            <p className="text-[10px] uppercase tracking-overline text-[#8FA69A] truncate">
+                                on maintyn · Community OS
+                            </p>
+                        </div>
                     </div>
-                    <p className="mt-2 text-[10px] uppercase tracking-overline text-[#8FA69A]">Community OS</p>
                 </div>
 
                 <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
@@ -76,10 +89,19 @@ export default function Layout() {
                     <div className="text-xs text-[#8FA69A]">Signed in as</div>
                     <div className="text-sm font-medium text-white truncate" data-testid="sidebar-user-name">{user?.name}</div>
                     <div className="text-[10px] uppercase tracking-overline text-[#C85A3C] mt-1">{user?.role}</div>
+                    {isAdmin && (
+                        <button
+                            data-testid="sidebar-society-settings"
+                            onClick={() => setSettingsOpen(true)}
+                            className="mt-3 w-full flex items-center justify-center gap-2 py-2 rounded-full bg-white/5 hover:bg-white/10 text-xs text-[#E2DFD8] transition-colors duration-200"
+                        >
+                            <Gear size={14} /> Society settings
+                        </button>
+                    )}
                     <button
                         data-testid="sidebar-logout"
                         onClick={async () => { await logout(); nav("/login"); }}
-                        className="mt-3 w-full flex items-center justify-center gap-2 py-2 rounded-full bg-white/5 hover:bg-[#C85A3C] hover:text-white text-sm text-[#E2DFD8] transition-colors duration-200"
+                        className="mt-2 w-full flex items-center justify-center gap-2 py-2 rounded-full bg-white/5 hover:bg-[#C85A3C] hover:text-white text-sm text-[#E2DFD8] transition-colors duration-200"
                     >
                         <SignOut size={16} />
                         Sign out
@@ -100,7 +122,7 @@ export default function Layout() {
                         </button>
                         <div className="lg:hidden"><Logo /></div>
                         <div className="hidden lg:block">
-                            <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">Society</p>
+                            <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft" data-testid="header-society-name">{societyName}</p>
                             <p className="font-heading font-semibold text-brand-ink">Welcome back, {user?.name?.split(" ")[0]}</p>
                         </div>
                     </div>
@@ -115,6 +137,7 @@ export default function Layout() {
                     <Outlet />
                 </main>
             </div>
+            <SocietySettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
         </div>
     );
 }

@@ -34,7 +34,7 @@ export function EmptyState({ title, description, image, action }) {
     );
 }
 
-export function Chip({ children, variant = "default" }) {
+export function Chip({ children, variant = "default", ...rest }) {
     const styles = {
         default: "bg-brand-sage text-brand-ink",
         warn: "bg-[#FFE9C7] text-[#7A4A00]",
@@ -43,7 +43,7 @@ export function Chip({ children, variant = "default" }) {
         neutral: "bg-brand-line text-brand-ink",
     };
     return (
-        <span className={`inline-flex items-center rounded-full text-[10px] uppercase tracking-overline px-2.5 py-1 font-medium ${styles[variant] || styles.default}`}>
+        <span {...rest} className={`inline-flex items-center rounded-full text-[10px] uppercase tracking-overline px-2.5 py-1 font-medium ${styles[variant] || styles.default}`}>
             {children}
         </span>
     );

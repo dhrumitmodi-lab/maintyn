@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Plus, CheckCircle, Clock, Warning } from "@phosphor-icons/react";
+import { Plus, CheckCircle, Clock, Warning, Bell } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 const CATS = ["plumbing", "electrical", "security", "cleanliness", "parking", "amenities", "general"];
@@ -68,6 +68,16 @@ export default function Complaints() {
                 }
             />
 
+            {!isStaff && (
+                <div className="mb-6 bg-brand-sage/60 border border-brand-line rounded-sm p-4 flex items-start gap-3" data-testid="complaint-notify-banner">
+                    <Bell size={20} weight="duotone" className="text-brand-action mt-0.5" />
+                    <div>
+                        <p className="font-medium text-brand-ink">You'll be notified by email whenever your complaint status changes.</p>
+                        <p className="text-xs text-brand-inkSoft mt-1">Track live status on this board — your complaints move across columns as the committee works on them.</p>
+                    </div>
+                </div>
+            )}
+
             {complaints.length === 0 ? (
                 <EmptyState title="Nothing to complain about" description="All quiet. Raise a complaint to bring an issue to the committee's attention." />
             ) : (
@@ -86,11 +96,13 @@ export default function Complaints() {
                             <div className="space-y-3">
                                 {grouped[status].length === 0 && <p className="text-xs text-brand-inkSoft py-6 text-center">Empty</p>}
                                 {grouped[status].map((c) => (
-                                    <div key={c.id} className="border border-brand-line rounded-sm p-3 hover:border-brand-ink transition-colors">
+                                    <div key={c.id} data-testid={`complaint-card-${c.id}`}
+                                        className="border border-brand-line rounded-sm p-3 hover:border-brand-ink transition-colors">
                                         <div className="flex items-start justify-between gap-2">
                                             <p className="font-medium text-brand-ink text-sm">{c.title}</p>
-                                            <Chip variant={statusChip[c.status]}>{c.category}</Chip>
+                                            <Chip variant={statusChip[c.status]} data-testid={`complaint-status-chip-${c.id}`}>{c.status.replace("_", " ")}</Chip>
                                         </div>
+                                        <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft mt-1">{c.category}</p>
                                         <p className="text-xs text-brand-inkSoft mt-2 line-clamp-2">{c.description}</p>
                                         <div className="flex items-center justify-between mt-3">
                                             <p className="text-[10px] uppercase tracking-overline text-brand-inkSoft">{c.created_by_name}</p>
