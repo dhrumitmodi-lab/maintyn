@@ -409,20 +409,38 @@ async def update_society(data: SocietyIn, _: dict = Depends(require_admin)):
     return await _get_society()
 
 # ---------- Directory ----------
+async def _flat_label_map(flat_ids: list) -> dict:
+    """Batch fetch flats by id and return {flat_id: 'block-number'}."""
+    ids = [fid for fid in flat_ids if fid]
+    if not ids:
+        return {}
+    out = {}
+    async for f in db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}):
+        out[f["id"]] = f"{f['block']}-{f['number']}"
+    return out
+
+async def _flat_map(flat_ids: list) -> dict:
+    """Batch fetch flats by id and return {flat_id: flat_doc}."""
+    ids = [fid for fid in flat_ids if fid]
+    if not ids:
+        return {}
+    out = {}
+    async for f in db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}):
+        out[f["id"]] = f
+    return out
+
 @api.get("/directory")
 async def directory(_: dict = Depends(get_current_user)):
     """All residents can see everyone's name + role + flat (contact info visible to committee/admin only via /committee)."""
     docs = await db.users.find({}, {"password_hash": 0, "_id": 0}).to_list(2000)
+    labels = await _flat_label_map([u.get("flat_id") for u in docs])
     out = []
     for u in docs:
-        flat = None
-        if u.get("flat_id"):
-            flat = await db.flats.find_one({"id": u["flat_id"]}, {"_id": 0})
         out.append({
             "id": u["id"],
             "name": u["name"],
             "role": u["role"],
-            "flat_label": f"{flat['block']}-{flat['number']}" if flat else None,
+            "flat_label": labels.get(u.get("flat_id")),
             "email": u["email"],
             "phone": u.get("phone"),
         })
@@ -433,12 +451,9 @@ async def directory(_: dict = Depends(get_current_user)):
 async def committee(_: dict = Depends(get_current_user)):
     """Public-to-residents list of admin+committee members with contact info."""
     docs = await db.users.find({"role": {"$in": ["admin", "committee"]}}, {"password_hash": 0, "_id": 0}).to_list(200)
+    labels = await _flat_label_map([u.get("flat_id") for u in docs])
     for u in docs:
-        u["flat_label"] = None
-        if u.get("flat_id"):
-            f = await db.flats.find_one({"id": u["flat_id"]}, {"_id": 0})
-            if f:
-                u["flat_label"] = f"{f['block']}-{f['number']}"
+        u["flat_label"] = labels.get(u.get("flat_id"))
     docs.sort(key=lambda u: (u["role"] != "admin", u["name"].lower()))
     return docs
 
@@ -591,10 +606,14 @@ async def import_users_csv(file: UploadFile = File(...), _: dict = Depends(requi
 @api.get("/flats")
 async def list_flats(user: dict = Depends(get_current_user)):
     docs = await db.flats.find({}, {"_id": 0}).sort([("block", 1), ("number", 1)]).to_list(2000)
-    # Enrich with residents
+    flat_ids = [f["id"] for f in docs]
+    # Batch fetch all residents in one query
+    residents_by_flat = {}
+    if flat_ids:
+        async for r in db.users.find({"flat_id": {"$in": flat_ids}}, {"password_hash": 0, "_id": 0}):
+            residents_by_flat.setdefault(r["flat_id"], []).append(r)
     for f in docs:
-        residents = await db.users.find({"flat_id": f["id"]}, {"password_hash": 0, "_id": 0}).to_list(50)
-        f["residents"] = residents
+        f["residents"] = residents_by_flat.get(f["id"], [])
     return docs
 
 @api.get("/flats/summary")
@@ -761,8 +780,9 @@ async def list_utility_bills(user: dict = Depends(get_current_user), flat_id: Op
     if status in ("paid", "unpaid"):
         q["status"] = status
     docs = await db.utility_bills.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    flats = await _flat_map([d.get("flat_id") for d in docs])
     for d in docs:
-        await _enrich_bill(d)
+        d["flat"] = flats.get(d.get("flat_id"))
     return docs
 
 @api.post("/utility-bills")
@@ -871,9 +891,9 @@ async def list_invoices(user: dict = Depends(get_current_user)):
             return []
         query["flat_id"] = user["flat_id"]
     docs = await db.invoices.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    flats = await _flat_map([d.get("flat_id") for d in docs])
     for d in docs:
-        f = await db.flats.find_one({"id": d["flat_id"]}, {"_id": 0})
-        d["flat"] = f
+        d["flat"] = flats.get(d.get("flat_id"))
     return docs
 
 @api.post("/invoices")
@@ -1092,9 +1112,9 @@ async def list_visitors(user: dict = Depends(get_current_user)):
             return []
         query["flat_id"] = user["flat_id"]
     docs = await db.visitors.find(query, {"_id": 0}).sort("check_in", -1).to_list(2000)
+    flats = await _flat_map([d.get("flat_id") for d in docs])
     for d in docs:
-        f = await db.flats.find_one({"id": d["flat_id"]}, {"_id": 0})
-        d["flat"] = f
+        d["flat"] = flats.get(d.get("flat_id"))
     return docs
 
 @api.post("/visitors")
