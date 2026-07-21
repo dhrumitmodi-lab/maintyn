@@ -92,6 +92,13 @@ Society Facility Management app for both committee members and residents. Commit
 - **Sidebar**: added "Staff & vendors" nav (visible to all roles — residents see the roster read-only via UI role gating).
 - **DB indexes**: `staff` collection indexed on `id` (unique) and `category`, provisioned for both Default and new societies.
 
+### 2026-07-21 (Iteration 11 · M-416 follow-up)
+- **Round-robin auto-assign**: `_auto_assign_staff` now picks the least-recently-auto-assigned active staff (tie-breaker: oldest `created_at`), and stamps `last_auto_assigned_at` after every pick. With 3 staff sharing a category, 6 complaints distribute exactly 2-2-2.
+- **Partial PATCH `/api/staff/{id}`**: new `StaffUpdate` model with all-Optional fields + `exclude_unset` so a `{is_active:false}` call updates just that field. Empty body → 400.
+- **Defaulter dunning**: `POST /api/invoices/defaulters/remind` — with empty body targets all flats whose oldest unpaid invoice is >90 days old; with `flat_ids` targets only those. Custom `subject` / `message` supported. Emails sent via Resend background tasks — each resident gets a formatted reminder with the full unpaid list, total due and flat label. Frontend: "Remind" per-row + "Remind all" buttons on `/app/invoices` defaulter section.
+- **Server split (partial)**: `server.py` (was 2409 lines) trimmed to ~2046 by moving Staff, Complaints, and Dashboards (invoice_stats, expense_stats, remind_defaulters) into `/app/backend/routes/{staff,complaints,dashboards}.py`. Each route module exposes a `_mount(app_module)` hook that wires FastAPI handlers using symbols imported at runtime from server.py — sidesteps circular imports. Router included via `api.include_router(...)` at the bottom of `server.py`.
+- Backend regression: 45/45 pytest passing (`tests/test_m416_followup.py`, `tests/test_staff_and_dashboards.py`).
+
 ## Notes
 - **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
 - **Multi-society setup**: fully done via master console — no need for separate deployments.
@@ -100,13 +107,16 @@ Society Facility Management app for both committee members and residents. Commit
 ### P1 (Next iteration)
 - Payment gateway (Stripe / Razorpay) for online invoice payments
 - WhatsApp receipts (Twilio) — deferred from M-416 (email-only shipped)
-- Partial PATCH for `/api/staff/{id}` (exclude_unset)
-- Auto-assign tie-breaker (least-loaded / round-robin) when multiple staff share a category
 
 ### P2 (Later)
+- Continue `server.py` refactor: move invoices, expenses, amenities/bookings, announcements, utilities into `routes/*.py` (staff/complaints/dashboards already done)
+- Replace `_mount(app_module)` injection with a shared `backend/deps.py` (importable, static)
+- Parallelise dunning sends per flat with `asyncio.gather`
+- Atomic RR auto-assign under high concurrency (findAndModify)
+- Sanitise custom subject/message in dunning to strip HTML/links
+- StaffUpdate: min_length on `name`/`role_label` to block empty-string overwrites
 - Polls / voting for AGM decisions
-- Refactor `server.py` (~2300 lines) into APIRouter modules (staff.py, invoices.py, complaints.py, expenses.py)
-- Defaulter dunning: auto-email defaulter reminder from the dashboard
+- Defaulter dunning: schedulable (weekly cron for still-unpaid flats)
 - Amenity booking rules (max bookings/resident/week, booking window)
 
 ## Test Credentials
