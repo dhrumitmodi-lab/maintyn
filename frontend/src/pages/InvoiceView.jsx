@@ -5,6 +5,7 @@ import { useSociety } from "@/context/SocietyContext";
 import { fileDownloadUrl } from "@/lib/files";
 import { Button } from "@/components/ui/button";
 import QRCode from "react-qr-code";
+import { LogoIcon } from "@/components/Logo";
 import { Printer, ArrowLeft, Copy } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
@@ -87,13 +88,7 @@ export default function InvoiceView() {
                                 className="w-16 h-16 object-contain rounded-sm border border-brand-line" />
                         ) : (
                             <div className="w-16 h-16 rounded-sm bg-brand-sage flex items-center justify-center">
-                                <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-                                    <rect x="2" y="10" width="28" height="20" rx="1" fill="#1B3127" />
-                                    <path d="M2 10 L16 2 L30 10" stroke="#1B3127" strokeWidth="2" strokeLinejoin="round" fill="none" />
-                                    <rect x="7" y="16" width="4" height="6" fill="#C85A3C" />
-                                    <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
-                                    <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
-                                </svg>
+                                <LogoIcon size={36} variant="brand" />
                             </div>
                         )}
                         <div>

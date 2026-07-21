@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import Logo from "@/components/Logo";
+import Logo, { LogoIcon } from "@/components/Logo";
 
 export default function Login() {
     const { login } = useAuth();
@@ -42,13 +42,7 @@ export default function Login() {
                 <div className="relative z-10 h-full flex flex-col justify-between p-12 text-white">
                     <Link to="/">
                         <div className="flex items-center gap-2">
-                            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
-                                <rect x="2" y="10" width="28" height="20" rx="1" fill="#F6F4F1" />
-                                <path d="M2 10 L16 2 L30 10" stroke="#F6F4F1" strokeWidth="2" strokeLinejoin="round" fill="none" />
-                                <rect x="7" y="16" width="4" height="6" fill="#C85A3C" />
-                                <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
-                                <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
-                            </svg>
+                            <LogoIcon size={30} variant="light" />
                             <span className="font-heading font-bold text-2xl tracking-tight">maintyn</span>
                         </div>
                     </Link>

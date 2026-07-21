@@ -7,7 +7,7 @@ import {
     House, Users as UsersIcon, Buildings, Receipt, CurrencyInr,
     ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti, AddressBook, Gear, HouseLine, Wrench
 } from "@phosphor-icons/react";
-import Logo from "@/components/Logo";
+import Logo, { LogoIcon } from "@/components/Logo";
 import { Button } from "@/components/ui/button";
 import { fileDownloadUrl } from "@/lib/files";
 
@@ -50,13 +50,7 @@ export default function Layout() {
                             <img src={societyLogoUrl} alt="logo" data-testid="sidebar-society-logo"
                                 className="w-8 h-8 rounded-sm object-contain bg-white/10 p-0.5" />
                         ) : (
-                            <svg width="24" height="24" viewBox="0 0 32 32" fill="none">
-                                <rect x="2" y="10" width="28" height="20" rx="1" fill="#F6F4F1" />
-                                <path d="M2 10 L16 2 L30 10" stroke="#F6F4F1" strokeWidth="2" strokeLinejoin="round" fill="none" />
-                                <rect x="7" y="16" width="4" height="6" fill="#C85A3C" />
-                                <rect x="14" y="16" width="4" height="6" fill="#DDECE5" />
-                                <rect x="21" y="16" width="4" height="6" fill="#DDECE5" />
-                            </svg>
+                            <LogoIcon size={26} variant="light" />
                         )}
                         <div className="min-w-0 flex-1">
                             <p className="font-heading font-bold text-lg tracking-tight text-white truncate" data-testid="sidebar-society-name">
