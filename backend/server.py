@@ -514,8 +514,10 @@ async def reset_password(data: ResetIn):
 @api.get("/users")
 async def list_users(user: dict = Depends(require_staff)):
     docs = await db.users.find({}, {"password_hash": 0, "_id": 0}).to_list(1000)
+    flats = await _flat_map([d.get("flat_id") for d in docs])
     for d in docs:
-        await enrich_user_flat(d)
+        if d.get("flat_id"):
+            d["flat"] = flats.get(d["flat_id"])
     return docs
 
 @api.post("/users")
@@ -1345,37 +1347,37 @@ async def _compute_digest_payload(target_month_anchor: _date) -> dict:
     start_iso, end_iso, next_start_iso = _month_range(target_month_anchor)
     label = f"{MONTH_NAMES[target_month_anchor.month - 1]} {target_month_anchor.year}"
 
-    # Invoices with created_at within month
+    # Invoices with created_at within month (aggregate for counts + sums)
+    inv_agg = await db.invoices.aggregate([
+        {"$match": {"created_at": {"$gte": start_iso, "$lt": next_start_iso}}},
+        {"$group": {"_id": "$status", "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
+    ]).to_list(10)
     inv_paid_count = 0
     inv_unpaid_count = 0
     collected = 0.0
     pending = 0.0
-    async for inv in db.invoices.find(
-        {"created_at": {"$gte": start_iso, "$lt": next_start_iso}},
-        {"status": 1, "amount": 1, "_id": 0}
-    ):
-        if inv["status"] == "paid":
-            inv_paid_count += 1
-            collected += float(inv["amount"])
+    for g in inv_agg:
+        if g["_id"] == "paid":
+            inv_paid_count = int(g["count"])
+            collected = float(g["total"])
         else:
-            inv_unpaid_count += 1
-            pending += float(inv["amount"])
+            inv_unpaid_count += int(g["count"])
+            pending += float(g["total"])
     total_invoices = inv_paid_count + inv_unpaid_count
     collection_pct = int(round((inv_paid_count / total_invoices) * 100)) if total_invoices else 0
 
-    # Complaints resolved this month (resolved_at falls in month)
+    # Complaints resolved this month
     resolved_count = await db.complaints.count_documents(
         {"status": "resolved", "resolved_at": {"$gte": start_iso, "$lt": next_start_iso}}
     )
     open_now = await db.complaints.count_documents({"status": {"$in": ["open", "in_progress"]}})
 
-    # Expenses in month
-    expenses_total = 0.0
-    async for e in db.expenses.find(
-        {"date": {"$gte": start_iso, "$lt": next_start_iso}},
-        {"amount": 1, "_id": 0}
-    ):
-        expenses_total += float(e["amount"])
+    # Expenses in month (aggregate)
+    exp_agg = await db.expenses.aggregate([
+        {"$match": {"date": {"$gte": start_iso, "$lt": next_start_iso}}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]).to_list(1)
+    expenses_total = float(exp_agg[0]["total"]) if exp_agg else 0.0
 
     # Upcoming bookings (from tomorrow, next 30 days)
     today_iso = _date.today().isoformat()
@@ -1533,17 +1535,21 @@ async def stats(user: dict = Depends(get_current_user)):
     inprogress_complaints = await db.complaints.count_documents({"status": "in_progress"})
     resolved_complaints = await db.complaints.count_documents({"status": "resolved"})
 
-    # Sum unpaid amount
+    # Sum invoices + expenses via aggregation (no full document scan)
+    inv_agg = await db.invoices.aggregate([
+        {"$group": {"_id": "$status", "total": {"$sum": "$amount"}}}
+    ]).to_list(10)
     total_collected = 0.0
     total_pending = 0.0
-    async for inv in db.invoices.find({}, {"status": 1, "amount": 1, "_id": 0}):
-        if inv["status"] == "paid":
-            total_collected += float(inv["amount"])
+    for g in inv_agg:
+        if g["_id"] == "paid":
+            total_collected = float(g["total"])
         else:
-            total_pending += float(inv["amount"])
-    total_expenses = 0.0
-    async for e in db.expenses.find({}, {"amount": 1, "_id": 0}):
-        total_expenses += float(e["amount"])
+            total_pending += float(g["total"])
+    exp_agg = await db.expenses.aggregate([
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+    ]).to_list(1)
+    total_expenses = float(exp_agg[0]["total"]) if exp_agg else 0.0
 
     active_visitors = await db.visitors.count_documents({"check_out": None})
     announcements_count = await db.announcements.count_documents({})
@@ -1559,9 +1565,11 @@ async def stats(user: dict = Depends(get_current_user)):
         resident_data["my_upcoming_bookings"] = my_bookings
         if user.get("flat_id"):
             my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
-            my_pending_amount = 0.0
-            async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}, {"amount": 1, "_id": 0}):
-                my_pending_amount += float(inv["amount"])
+            my_agg = await db.invoices.aggregate([
+                {"$match": {"flat_id": user["flat_id"], "status": "unpaid"}},
+                {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+            ]).to_list(1)
+            my_pending_amount = float(my_agg[0]["total"]) if my_agg else 0.0
             resident_data["my_unpaid_count"] = my_unpaid
             resident_data["my_pending_amount"] = my_pending_amount
 
