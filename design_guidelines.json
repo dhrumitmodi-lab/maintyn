@@ -1,0 +1,126 @@
+{
+  "theme": "light",
+  "app_name": "maintyn",
+  "typography": {
+    "font_family": {
+      "headings": "Outfit, sans-serif",
+      "body": "Manrope, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "rules": [
+      "NEVER use Inter, Roboto, Open Sans, or Lato.",
+      "Headlines > 32px MUST use tracking-tight or tracking-tighter.",
+      "Overlines/Labels MUST be Uppercase, text-xs, tracking-[0.2em].",
+      "Line height: leading-none for headers, leading-relaxed for body.",
+      "H1 max text-5xl (fluid clamp preferable), H2 max text-4xl."
+    ]
+  },
+  "colors": {
+    "archetype": "Organic & Earthy + Dashboard Density",
+    "palette": {
+      "background": "#F6F4F1", 
+      "surface": "#FFFFFF",
+      "text_primary": "#1B3127",
+      "text_secondary": "#576B61",
+      "primary_action": "#C85A3C",
+      "primary_action_hover": "#A6462B",
+      "accent_sage": "#DDECE5",
+      "border": "#E2DFD8"
+    },
+    "rules": [
+      "NO purple-white gradients. NO teal blue/green for actions.",
+      "Use 'Tinted Grey' - all neutrals must have a warm (orange/yellow) undertone.",
+      "Text color must explicitly change on hover (e.g., hover:bg-[#1B3127] hover:text-white).",
+      "Focus states must have higher contrast than default.",
+      "Limit the use of primary color to CTAs only."
+    ]
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing (p-6, p-8, p-12) for containers, dense spacing for data tables.",
+    "grid_strategy": "High Density Grid (Mode B)",
+    "rules": [
+      "Dashboards use grid-cols-1 md:grid-cols-3 lg:grid-cols-4 with gap-6.",
+      "Every pixel utilized. Use h-full on children to ensure stretch. No jagged bottoms.",
+      "Containers with borders MUST have p-6 or p-8 internal padding.",
+      "Mobile images max-h-[80vh]."
+    ]
+  },
+  "components": {
+    "cards": {
+      "style": "Neumorphic/Clay variant without heavy shadows. Flat solid background, rounded-sm (4px max), 1px subtle border (#E2DFD8).",
+      "hover": "-translate-y-1, subtle shadow-lg, border color darkens."
+    },
+    "buttons": {
+      "style": "Pill-shaped (rounded-full) to contrast sharp cards. High contrast text.",
+      "primary": "bg-[#C85A3C] text-white hover:bg-[#A6462B]",
+      "secondary": "bg-[#DDECE5] text-[#1B3127] hover:bg-[#C9DCD2]"
+    },
+    "forms_and_inputs": {
+      "style": "Always use Shadcn Input, Select, Form. rounded-sm, border-[#E2DFD8], bg-transparent. focus:ring-2 focus:ring-[#C85A3C]",
+      "note": "Left-align labels. Provide clear active/focus states. Use Shadcn calendar for date pickers."
+    },
+    "tables": {
+      "style": "Dense padding (py-2 px-4). Header row bg-[#F6F4F1] border-b border-[#E2DFD8]. Keep rows clean white, no alternating row colors."
+    },
+    "navigation": {
+      "style": "Sidebar navigation: bg-[#13241D] text-[#E2DFD8]. Active link: bg-[#1B3127] text-white border-l-4 border-[#C85A3C].",
+      "header": "Solid surface bg-white border-b border-[#E2DFD8]. NO transparent headers. EVER."
+    }
+  },
+  "motion": {
+    "rules": [
+      "Hover states for ALL interactive elements.",
+      "Use specific transitions (e.g., transition-transform duration-200 ease-out), NEVER transition-all.",
+      "Micro-animations on buttons (active:scale-95).",
+      "Respect prefers-reduced-motion."
+    ]
+  },
+  "icons_and_assets": {
+    "library": "@phosphor-icons/react",
+    "instructions": "Use Phosphor Icons for dense dashboards. Install via yarn add @phosphor-icons/react."
+  },
+  "images": {
+    "login_hero": {
+      "url": "https://images.unsplash.com/photo-1624204386084-dd8c05e32226?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTJ8MHwxfHNlYXJjaHwzfHxtb2Rlcm4lMjByZXNpZGVudGlhbCUyMGFwYXJ0bWVudCUyMGJ1aWxkaW5nJTIwZXh0ZXJpb3J8ZW58MHx8fHwxNzg0NjIzMzM0fDA&ixlib=rb-4.1.0&q=85",
+      "context": "Background or split-screen image for the login/signup page."
+    },
+    "empty_state_invoices": {
+      "url": "https://images.unsplash.com/photo-1625585598750-3535fe40efb3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTJ8MHwxfHNlYXJjaHwxfHxtaW5pbWFsaXN0JTIwZW1wdHklMjByb29tJTIwc3VubGlnaHR8ZW58MHx8fHwxNzg0NjIzMzM0fDA&ixlib=rb-4.1.0&q=85",
+      "context": "Empty state illustration for 'No Invoices' or 'No Flats Assigned'."
+    },
+    "empty_state_expenses": {
+      "url": "https://images.unsplash.com/photo-1704310546522-59f10c7ec294?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NTJ8MHwxfHNlYXJjaHwyfHxtaW5pbWFsaXN0JTIwZW1wdHklMjByb29tJTIwc3VubGlnaHR8ZW58MHx8fHwxNzg0NjIzMzM0fDA&ixlib=rb-4.1.0&q=85",
+      "context": "Empty state for 'No Expense Reports'."
+    }
+  },
+  "accessibility": {
+    "rules": [
+      "All interactive elements MUST have data-testid attributes (e.g., data-testid='login-submit-button').",
+      "Minimum 4.5:1 contrast ratio for normal text.",
+      "Use pure solid backgrounds for medical/financial/management data to prevent visual refraction."
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Read this guideline entirely before building components.",
+    "Install required dependencies: yarn add @phosphor-icons/react sonner date-fns",
+    "Update tailwind.config.js to include Outfit and Manrope font families.",
+    "Apply global CSS variables for the color palette as per the archetype.",
+    "Prioritize Shadcn components (using the .jsx files present in /app/frontend/src/components/ui) and modify their classes to match the rounded-sm / border settings."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. In frontend design, this creates what users call the 'AI slop' aesthetic. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects ONLY where applicable (not for dashboards). Dashboards use Solid surfaces.",
+    "You MUST NOT apply universal transition (e.g., transition: all). This results in breaking transforms.",
+    "You MUST NOT center align the app container, i.e. do not add .App { text-align: center; }.",
+    "Always use modern button styles like pill-shaped, or sharp button with interaction animations & color relevant to the app style.",
+    "NEVER use AI assistant Emoji characters like 🤖🧠💭💡🔮🎯 etc for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, entrance animations. Static = dead.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Main agent relies on these image URLs. NEVER use placeholder text for images.",
+    "Use sonner for toasts, component located in /app/frontend/src/components/ui/sonner.jsx.",
+    "All components must be .jsx and functional components."
+  ]
+}
