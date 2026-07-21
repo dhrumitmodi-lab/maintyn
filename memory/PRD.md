@@ -73,8 +73,17 @@ Society Facility Management app for both committee members and residents. Commit
 - **Society logo** shown in the sidebar header when uploaded (falls back to default SVG mark).
 - Backend `_get_society()` now merges default None for any missing keys on legacy docs; `PATCH /api/society` accepts partial payloads (name no longer required) but rejects blanking the name.
 
+### 2026-02-21 (Iteration 9)
+- **Multi-tenant master DB architecture**: master DB (`maintyn_master`) with `societies`, `master_users`, `user_index` collections. Each society lives in its own MongoDB DB (`maintyn_society_<uuid>`). `_DBProxy` + ContextVar keeps ~200 existing queries unchanged.
+- **Master console at `/master`** (super_admin + support): rollup stats, list societies with resident/flat/unpaid counts, create society (auto-sends welcome email to first admin), suspend/reactivate, delete (except Default), impersonate any society's admin.
+- **Support-agent management** (super_admin only tab): create additional master users, toggle active, delete.
+- **Startup migration**: legacy data preserved by copying into a "Default Society" DB and rebuilding `user_index`. Idempotent.
+- **JWT enhanced**: `kind` (master|society) + `society_id` claim; `get_current_user` transparently sets the tenant DB context.
+- **Suspended societies block logins** (403).
+
 ## Notes
-- **Multi-society setup (per user choice B)**: Deploy this same repo 2 more times, each with its own `DB_NAME` env var and its own preview URL. Each deployment is fully isolated (its own MongoDB namespace, own admin, own users).
+- **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
+- **Multi-society setup**: fully done via master console — no need for separate deployments.
 
 ## Prioritized Backlog
 ### P1 (Next iteration)

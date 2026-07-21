@@ -637,7 +637,7 @@ async def list_societies(_: dict = Depends(get_master_user)):
     for s in docs:
         sid = s["id"]
         sdb = _get_society_db(sid)
-        residents = await sdb.users.count_documents({})
+        residents = await sdb.users.count_documents({"role": "resident"})
         unpaid = await sdb.invoices.count_documents({"status": "unpaid"})
         flats = await sdb.flats.count_documents({})
         out.append({**s, "residents": residents, "unpaid_invoices": unpaid, "flats": flats})
