@@ -38,10 +38,15 @@ Society Facility Management app for both committee members and residents. Commit
 - Booking confirmation + cancellation emails via Resend.
 - Dashboard extended with bookings_today / bookings_upcoming / amenities_active / my_upcoming_bookings.
 
+### 2026-02-21 (Iteration 4)
+- **Monthly community digest email** — auto-sent on the 1st of each month at 09:00 UTC via APScheduler.
+- Endpoints: `POST /api/admin/digest/preview` (dry-run), `POST /api/admin/digest/send` (idempotent per YYYY-MM), `GET /api/admin/digest/runs`.
+- Digest content: collection %, resolved complaints, upcoming bookings (next 30 days), notices posted in the month.
+- Admin UI on the Notices page to preview + send on demand, with history of past sends.
+
 ## Prioritized Backlog
 ### P1 (Next iteration)
-- Payment gateway (Stripe / Razorpay) — collect maintenance & amenity fees online
-- Monthly community digest email (auto on 1st of each month)
+- Payment gateway (Stripe / Razorpay)
 
 ### P2 (Later)
 - Polls / voting for AGM decisions

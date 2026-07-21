@@ -1112,6 +1112,7 @@ async def _compute_digest_payload(target_month_anchor: _date) -> dict:
 
 def _digest_html(user: dict, p: dict) -> str:
     inr = lambda n: f"₹{n:,.0f}"
+    first_name = (user.get("name") or "Resident").split()[0]
     bar = f"""
       <div style="background:#F6F4F1;border-radius:999px;height:10px;overflow:hidden;margin:8px 0 4px">
         <div style="background:#C85A3C;height:10px;width:{p['collection_pct']}%"></div>
@@ -1139,11 +1140,9 @@ def _digest_html(user: dict, p: dict) -> str:
 
     personal = ""
     if user.get("role") == "resident" and user.get("flat_id"):
-        my_unpaid = 0
-        # simple count (approx) — the caller precomputes if needed
-        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {user['name'].split()[0]}, here's a snapshot of your community this month.</p>"
+        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {first_name}, here's a snapshot of your community this month.</p>"
     else:
-        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {user['name'].split()[0]}, here's how the community did this month.</p>"
+        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {first_name}, here's how the community did this month.</p>"
 
     body = f"""
       {personal}
