@@ -8,11 +8,17 @@ export function AuthProvider({ children }) {
     const [loading, setLoading] = useState(true);
 
     async function refresh() {
+        setLoading(true);
         try {
             const { data } = await api.get("/auth/me");
             setUser(data);
         } catch {
-            setUser(false);
+            try {
+                const { data } = await api.get("/master/session");
+                setUser({ ...data, kind: "master" });
+            } catch {
+                setUser(false);
+            }
         } finally {
             setLoading(false);
         }

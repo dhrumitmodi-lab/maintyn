@@ -21,6 +21,7 @@ import Amenities from "@/pages/Amenities";
 import Directory from "@/pages/Directory";
 import MyFlat from "@/pages/MyFlat";
 import InvoiceView from "@/pages/InvoiceView";
+import MasterConsole from "@/pages/MasterConsole";
 import "@/App.css";
 
 function Protected({ children, roles }) {
@@ -39,6 +40,14 @@ function Protected({ children, roles }) {
     return children;
 }
 
+function MasterProtected({ children }) {
+    const { user, loading } = useAuth();
+    if (loading) return null;
+    if (!user) return <Navigate to="/login" replace />;
+    if (user.kind !== "master") return <Navigate to="/app" replace />;
+    return children;
+}
+
 function App() {
     return (
         <AuthProvider>
@@ -51,6 +60,7 @@ function App() {
                         <Route path="/register" element={<Register />} />
                         <Route path="/forgot-password" element={<ForgotPassword />} />
                         <Route path="/reset-password" element={<ResetPassword />} />
+                        <Route path="/master" element={<MasterProtected><MasterConsole /></MasterProtected>} />
                         <Route path="/app" element={<Protected><Layout /></Protected>}>
                             <Route index element={<Dashboard />} />
                             <Route path="users" element={<Protected roles={["admin", "committee"]}><Users /></Protected>} />

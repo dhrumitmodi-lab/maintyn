@@ -1,0 +1,47 @@
+{
+  "summary": "Iteration 9 — Multi-tenant master DB. Comprehensive backend + frontend testing done. 14/15 backend pytest tests PASSED. All critical multi-tenant flows work correctly: master/society login kinds, data migration (24 users + 33 flats preserved in Default Society), master session, societies list, rollup, RBAC (support agent cannot create society), create/suspend/restore/delete society, impersonate, cannot-delete-default (400), cannot-delete-self, and airtight data isolation (new society admin sees 0 flats + 1 user; Default admin still sees 33 flats + 24 users; impersonation returns correct tenant scope). Sunrise Heights society successfully deleted per instructions. Frontend master console fully functional: master login redirects to /master, master-user-name/tabs/create-society-btn all present, rollup StatCards render correctly, society creation via dialog works end-to-end, impersonate/toggle/delete action buttons render (delete correctly hidden for Default), Support team tab works. Only 1 minor spec deviation found (see below).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/auth/me",
+        "issue": "Spec says master tokens should get 401 (or be at least ignored). Actual: returns 200 with the master user object including kind='master'. Since kind field distinguishes it, client can still route correctly, but strict spec compliance would return 401. Not blocking — MasterProtected uses /master/session anyway."
+      },
+      {
+        "endpoint": "GET /api/master/rollup vs GET /api/master/societies",
+        "issue": "Inconsistent resident counting: Default Society shows residents=24 in /master/societies listing but total_residents=21 in /master/rollup. Suggests one counts all users (incl. admin) and the other counts role='resident' only. Recommend unifying the definition."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "MasterConsole create-society dialog", "issues": ["Radix Dialog warning: 'Missing Description or aria-describedby={undefined} for {DialogContent}' — accessibility warning, non-blocking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_master_multitenant.py",
+    "/app/test_reports/pytest/master_multitenant.xml"
+  ],
+  "action_items": [
+    "(Optional) Make GET /api/auth/me return 401 when JWT kind='master' — currently returns 200 with master identity.",
+    "(Optional) Unify resident counting between /master/societies listing (24) and /master/rollup (21) so both use the same definition.",
+    "(Optional) Add aria-describedby / DialogDescription in MasterConsole create-society Dialog to silence Radix a11y warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2011 lines — should be split into modules (auth, master, society_scoped, files, invoices, expenses, amenities). Getting unmaintainable.",
+    "Multi-tenant _DBProxy with ContextVar approach is elegant; verified isolation works across concurrent requests via impersonation + parallel admin logins.",
+    "Startup migration is idempotent — verified by observing existing 33 flats + 24 users intact in Default Society DB."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_master_multitenant.py (new)"
+  ],
+  "success_rate": {"backend": "93% (14/15 pytest — 1 minor spec deviation on /auth/me)", "frontend": "100% (all required testids present, create-society + impersonate + toggle + delete + tabs all work)"},
+  "test_credentials": "master@maintyn.in / Master@12345 (super_admin, works). admin@maintyn.app / Admin@12345 (Default Society admin, works). kavita@sunrise.example / Kavita@2026 (worked before Sunrise Heights was deleted per test instructions).",
+  "seed_data_creation": "Created and then deleted transient TEST_Society_<ts> and TEST_FE_<ts> societies during CRUD tests. Also created and deleted TEST_agent_<ts> and TEST_support_<ts> master users. All test data cleaned up. Sunrise Heights society deleted per explicit instruction in review request. Final state: 1 society (Default Society) with 24 users + 33 flats intact.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Master console testids to reuse: master-user-name, master-create-society-btn, master-tab-societies, master-tab-agents, society-row-<sid>, society-name-field, society-admin-name, society-admin-email, society-admin-password, society-create-submit, impersonate-<sid>, toggle-<sid>, delete-<sid> (delete hidden for is_default=true society). MasterConsole calls /api/master/session first, /api/auth/me routes are only for society users. JWT contains kind field ('master' or 'society') plus society_id for society tokens.",
+  "rca_of_the_issue": "N/A — no critical bugs. Two minor deviations documented: (1) /api/auth/me should ideally 401 for master tokens (currently 200 with kind='master' — client-side MasterProtected uses /master/session so functionally OK); (2) resident count semantics differ between rollup (role='resident' filter, 21) and society listing (all users, 24) — cosmetic inconsistency."
+}

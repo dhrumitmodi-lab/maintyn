@@ -19,9 +19,9 @@ export default function Login() {
         e.preventDefault();
         setBusy(true);
         try {
-            await login(email, password);
+            const data = await login(email, password);
             toast.success("Welcome back");
-            nav("/app");
+            nav(data?.kind === "master" ? "/master" : "/app");
         } catch (err) {
             toast.error(formatError(err));
         } finally {

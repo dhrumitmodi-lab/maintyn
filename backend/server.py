@@ -29,6 +29,7 @@ from pydantic import BaseModel, EmailStr, Field
 # ---------- Config ----------
 MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
+MASTER_DB_NAME = os.environ.get('MASTER_DB_NAME', 'maintyn_master')
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
@@ -40,7 +41,31 @@ EMAIL_FROM_NAME = os.environ.get('EMAIL_FROM_NAME', 'maintyn')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
 client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
+master_db = client[MASTER_DB_NAME]
+
+# Per-request tenant DB via ContextVar; existing code uses `db.<collection>` transparently.
+from contextvars import ContextVar
+_current_db: ContextVar = ContextVar("current_db", default=None)
+
+def _db_name_for_society(society_id: str) -> str:
+    return f"maintyn_society_{society_id.replace('-', '')}"
+
+def _get_society_db(society_id: str):
+    return client[_db_name_for_society(society_id)]
+
+class _DBProxy:
+    """Transparent proxy to the current-tenant Motor db held in a ContextVar.
+    Falls back to the legacy DB_NAME db when no context is set (startup, workers)."""
+    _fallback = client[DB_NAME]
+    def _target(self):
+        d = _current_db.get()
+        return d if d is not None else self._fallback
+    def __getattr__(self, name):
+        return getattr(self._target(), name)
+    def __getitem__(self, name):
+        return self._target()[name]
+
+db = _DBProxy()
 
 app = FastAPI(title="Maintyn API")
 api = APIRouter(prefix="/api")
@@ -137,9 +162,11 @@ def verify_password(pw: str, hashed: str) -> bool:
     except Exception:
         return False
 
-def create_access_token(user_id: str, email: str, role: str) -> str:
-    payload = {"sub": user_id, "email": email, "role": role,
+def create_access_token(user_id: str, email: str, role: str, kind: str = "society", society_id: Optional[str] = None) -> str:
+    payload = {"sub": user_id, "email": email, "role": role, "kind": kind,
                "exp": datetime.now(timezone.utc) + timedelta(hours=12), "type": "access"}
+    if society_id:
+        payload["society_id"] = society_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def create_refresh_token(user_id: str) -> str:
@@ -166,11 +193,28 @@ async def get_current_user(request: Request) -> dict:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             raise HTTPException(401, "Invalid token type")
+        kind = payload.get("kind", "society")
+        if kind == "master":
+            mu = await master_db.master_users.find_one({"id": payload["sub"], "is_active": True})
+            if not mu:
+                raise HTTPException(401, "User not found")
+            mu.pop("_id", None); mu.pop("password_hash", None)
+            mu["kind"] = "master"
+            return mu
+        # society user — set tenant context so all `db.<coll>` calls hit the right DB
+        sid = payload.get("society_id")
+        if not sid:
+            raise HTTPException(401, "Missing society context")
+        soc = await master_db.societies.find_one({"id": sid})
+        if not soc or soc.get("status") == "suspended":
+            raise HTTPException(403, "Society is suspended or missing")
+        _current_db.set(_get_society_db(sid))
         user = await db.users.find_one({"id": payload["sub"]})
         if not user:
             raise HTTPException(401, "User not found")
-        user.pop("_id", None)
-        user.pop("password_hash", None)
+        user.pop("_id", None); user.pop("password_hash", None)
+        user["society_id"] = sid
+        user["kind"] = "society"
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "Token expired")
@@ -344,8 +388,15 @@ async def enrich_user_flat(u: dict):
 @api.post("/auth/register")
 async def register(data: RegisterIn, response: Response):
     email = data.email.lower()
-    if await db.users.find_one({"email": email}):
+    # Look up in master user_index to see if email exists somewhere
+    existing = await master_db.user_index.find_one({"email": email})
+    if existing:
         raise HTTPException(400, "Email already registered")
+    # Self-register goes into the DEFAULT society
+    default_soc = await master_db.societies.find_one({"is_default": True})
+    if not default_soc:
+        raise HTTPException(500, "No default society configured")
+    _current_db.set(_get_society_db(default_soc["id"]))
     user = {
         "id": new_id(),
         "email": email,
@@ -357,21 +408,41 @@ async def register(data: RegisterIn, response: Response):
         "created_at": now_iso(),
     }
     await db.users.insert_one(user)
-    at = create_access_token(user["id"], email, "resident")
+    await master_db.user_index.insert_one({
+        "email": email, "user_id": user["id"], "society_id": default_soc["id"], "kind": "society"
+    })
+    at = create_access_token(user["id"], email, "resident", "society", default_soc["id"])
     rt = create_refresh_token(user["id"])
     set_auth_cookies(response, at, rt)
-    return {**clean(user), "access_token": at}
+    return {**clean(user), "society_id": default_soc["id"], "access_token": at}
 
 @api.post("/auth/login")
 async def login(data: LoginIn, response: Response):
     email = data.email.lower()
-    user = await db.users.find_one({"email": email})
+    # 1) Master user?
+    mu = await master_db.master_users.find_one({"email": email, "is_active": True})
+    if mu and verify_password(data.password, mu["password_hash"]):
+        at = create_access_token(mu["id"], email, mu["role"], "master")
+        rt = create_refresh_token(mu["id"])
+        set_auth_cookies(response, at, rt)
+        return {"id": mu["id"], "email": email, "name": mu["name"], "role": mu["role"], "kind": "master", "access_token": at}
+    # 2) Society user via master user_index
+    idx = await master_db.user_index.find_one({"email": email, "kind": "society"})
+    if not idx:
+        raise HTTPException(401, "Invalid email or password")
+    soc = await master_db.societies.find_one({"id": idx["society_id"]})
+    if not soc:
+        raise HTTPException(401, "Invalid email or password")
+    if soc.get("status") == "suspended":
+        raise HTTPException(403, "This society is suspended. Contact support.")
+    _current_db.set(_get_society_db(idx["society_id"]))
+    user = await db.users.find_one({"id": idx["user_id"]})
     if not user or not verify_password(data.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
-    at = create_access_token(user["id"], email, user["role"])
+    at = create_access_token(user["id"], email, user["role"], "society", idx["society_id"])
     rt = create_refresh_token(user["id"])
     set_auth_cookies(response, at, rt)
-    return {**clean(user), "access_token": at}
+    return {**clean(user), "society_id": idx["society_id"], "society_name": soc["name"], "kind": "society", "access_token": at}
 
 @api.post("/auth/logout")
 async def logout(response: Response, _: dict = Depends(get_current_user)):
@@ -531,6 +602,193 @@ async def reset_password(data: ResetIn):
     return {"ok": True}
 
 
+async def get_master_user(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("kind") != "master":
+        raise HTTPException(403, "Master access required")
+    return user
+
+async def require_super_admin(user: dict = Depends(get_master_user)) -> dict:
+    if user["role"] != "super_admin":
+        raise HTTPException(403, "Super-admin only")
+    return user
+
+# ---------- Master console ----------
+class SocietyCreateIn(BaseModel):
+    name: str = Field(min_length=1)
+    admin_name: str = Field(min_length=1)
+    admin_email: EmailStr
+    admin_password: str = Field(min_length=6)
+    admin_phone: Optional[str] = None
+
+class MasterUserIn(BaseModel):
+    name: str = Field(min_length=1)
+    email: EmailStr
+    password: str = Field(min_length=6)
+    role: str = "support"  # super_admin | support
+
+@api.get("/master/session")
+async def master_session(user: dict = Depends(get_master_user)):
+    return user
+
+@api.get("/master/societies")
+async def list_societies(_: dict = Depends(get_master_user)):
+    docs = await master_db.societies.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    out = []
+    for s in docs:
+        sid = s["id"]
+        sdb = _get_society_db(sid)
+        residents = await sdb.users.count_documents({})
+        unpaid = await sdb.invoices.count_documents({"status": "unpaid"})
+        flats = await sdb.flats.count_documents({})
+        out.append({**s, "residents": residents, "unpaid_invoices": unpaid, "flats": flats})
+    return out
+
+@api.post("/master/societies")
+async def create_society(data: SocietyCreateIn, current: dict = Depends(require_super_admin), background: BackgroundTasks = None):
+    email = data.admin_email.lower()
+    if await master_db.user_index.find_one({"email": email}):
+        raise HTTPException(400, "Admin email already registered elsewhere")
+    sid = new_id()
+    soc = {
+        "id": sid,
+        "name": data.name,
+        "db_name": _db_name_for_society(sid),
+        "status": "active",
+        "is_default": False,
+        "first_admin_email": email,
+        "first_admin_name": data.admin_name,
+        "created_by": current["id"],
+        "created_at": now_iso(),
+    }
+    await master_db.societies.insert_one(soc); soc.pop("_id", None)
+    sdb = _get_society_db(sid)
+    await sdb.users.create_index("id", unique=True)
+    await sdb.users.create_index("email", unique=True)
+    await sdb.flats.create_index("id", unique=True)
+    await sdb.invoices.create_index("id", unique=True); await sdb.invoices.create_index("flat_id")
+    await sdb.expenses.create_index("id", unique=True)
+    await sdb.complaints.create_index("id", unique=True)
+    await sdb.announcements.create_index("id", unique=True)
+    await sdb.visitors.create_index("id", unique=True)
+    await sdb.files.create_index("id", unique=True)
+    await sdb.amenities.create_index("id", unique=True)
+    await sdb.bookings.create_index("id", unique=True)
+    await sdb.utility_connections.create_index("id", unique=True)
+    await sdb.utility_bills.create_index("id", unique=True)
+    admin_user = {
+        "id": new_id(), "email": email, "password_hash": hash_password(data.admin_password),
+        "name": data.admin_name, "phone": data.admin_phone, "role": "admin",
+        "flat_id": None, "created_at": now_iso(),
+    }
+    await sdb.users.insert_one(admin_user); admin_user.pop("_id", None); admin_user.pop("password_hash", None)
+    await master_db.user_index.insert_one({"email": email, "user_id": admin_user["id"], "society_id": sid, "kind": "society"})
+    # Welcome email
+    body = (f"<p>Hi {data.admin_name},</p>"
+            f"<p>Your society <b>{data.name}</b> has been set up on maintyn.</p>"
+            f"<p>Sign in as admin using these credentials:</p>"
+            f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;margin:12px 0'>"
+            f"<tr><td style='color:#576B61'>Email</td><td><b>{email}</b></td></tr>"
+            f"<tr><td style='color:#576B61'>Temporary password</td><td><code>{data.admin_password}</code></td></tr>"
+            f"</table>"
+            f"<p>After first sign-in, please reset your password via 'Forgot password?'.</p>")
+    html = _email_frame(f"Welcome to {data.name} on maintyn", body, f"{FRONTEND_URL}/login", "Sign in")
+    if background is not None:
+        background.add_task(send_email_raw, email, f"Welcome to {data.name} on maintyn", html)
+    return {**soc, "admin_user_id": admin_user["id"]}
+
+@api.patch("/master/societies/{sid}/status")
+async def toggle_society(sid: str, payload: dict, _: dict = Depends(require_super_admin)):
+    status = payload.get("status")
+    if status not in ("active", "suspended"):
+        raise HTTPException(400, "status must be 'active' or 'suspended'")
+    res = await master_db.societies.update_one({"id": sid}, {"$set": {"status": status, "updated_at": now_iso()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Society not found")
+    return await master_db.societies.find_one({"id": sid}, {"_id": 0})
+
+@api.delete("/master/societies/{sid}")
+async def delete_society(sid: str, _: dict = Depends(require_super_admin)):
+    soc = await master_db.societies.find_one({"id": sid})
+    if not soc:
+        raise HTTPException(404, "Society not found")
+    if soc.get("is_default"):
+        raise HTTPException(400, "Cannot delete the Default society")
+    await client.drop_database(_db_name_for_society(sid))
+    await master_db.user_index.delete_many({"society_id": sid})
+    await master_db.societies.delete_one({"id": sid})
+    return {"ok": True}
+
+@api.post("/master/societies/{sid}/impersonate")
+async def impersonate(sid: str, response: Response, current: dict = Depends(get_master_user)):
+    soc = await master_db.societies.find_one({"id": sid})
+    if not soc:
+        raise HTTPException(404, "Society not found")
+    sdb = _get_society_db(sid)
+    admin = await sdb.users.find_one({"role": "admin"}) or await sdb.users.find_one({})
+    if not admin:
+        raise HTTPException(400, "No users exist in that society yet")
+    at = create_access_token(admin["id"], admin["email"], admin["role"], "society", sid)
+    rt = create_refresh_token(admin["id"])
+    set_auth_cookies(response, at, rt)
+    return {"society_id": sid, "society_name": soc["name"], "user": {"id": admin["id"], "email": admin["email"], "name": admin["name"], "role": admin["role"]}, "access_token": at, "impersonated_by": current["email"]}
+
+@api.get("/master/rollup")
+async def rollup(_: dict = Depends(get_master_user)):
+    societies = await master_db.societies.find({}, {"_id": 0}).to_list(1000)
+    total_res = 0; total_flats = 0; total_unpaid = 0; total_open_complaints = 0; total_pending_amt = 0.0
+    for s in societies:
+        sdb = _get_society_db(s["id"])
+        total_res += await sdb.users.count_documents({"role": "resident"})
+        total_flats += await sdb.flats.count_documents({})
+        total_unpaid += await sdb.invoices.count_documents({"status": "unpaid"})
+        total_open_complaints += await sdb.complaints.count_documents({"status": {"$in": ["open", "in_progress"]}})
+        agg = await sdb.invoices.aggregate([{"$match": {"status": "unpaid"}}, {"$group": {"_id": None, "t": {"$sum": "$amount"}}}]).to_list(1)
+        if agg: total_pending_amt += float(agg[0]["t"])
+    return {"societies": len(societies), "total_residents": total_res, "total_flats": total_flats,
+            "total_unpaid_invoices": total_unpaid, "total_open_complaints": total_open_complaints,
+            "total_pending_amount": total_pending_amt}
+
+@api.get("/master/users")
+async def list_master_users(_: dict = Depends(require_super_admin)):
+    docs = await master_db.master_users.find({}, {"password_hash": 0, "_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api.post("/master/users")
+async def create_master_user(data: MasterUserIn, _: dict = Depends(require_super_admin)):
+    email = data.email.lower()
+    if await master_db.master_users.find_one({"email": email}):
+        raise HTTPException(400, "Email already exists")
+    if data.role not in ("super_admin", "support"):
+        raise HTTPException(400, "Invalid role")
+    u = {"id": new_id(), "email": email, "name": data.name, "role": data.role,
+         "password_hash": hash_password(data.password), "is_active": True, "created_at": now_iso()}
+    await master_db.master_users.insert_one(u); u.pop("_id", None); u.pop("password_hash", None)
+    return u
+
+@api.patch("/master/users/{uid}")
+async def update_master_user(uid: str, payload: dict, _: dict = Depends(require_super_admin)):
+    upd = {}
+    if "is_active" in payload: upd["is_active"] = bool(payload["is_active"])
+    if "role" in payload and payload["role"] in ("super_admin", "support"): upd["role"] = payload["role"]
+    if "password" in payload and payload["password"]:
+        upd["password_hash"] = hash_password(payload["password"])
+    if not upd:
+        raise HTTPException(400, "No changes")
+    res = await master_db.master_users.update_one({"id": uid}, {"$set": upd})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    doc = await master_db.master_users.find_one({"id": uid}, {"password_hash": 0, "_id": 0})
+    return doc
+
+@api.delete("/master/users/{uid}")
+async def delete_master_user(uid: str, current: dict = Depends(require_super_admin)):
+    if uid == current["id"]:
+        raise HTTPException(400, "Cannot delete yourself")
+    res = await master_db.master_users.delete_one({"id": uid})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
 # ---------- Users ----------
 @api.get("/users")
 async def list_users(user: dict = Depends(require_staff)):
@@ -542,9 +800,9 @@ async def list_users(user: dict = Depends(require_staff)):
     return docs
 
 @api.post("/users")
-async def create_user(data: UserCreate, _: dict = Depends(require_admin)):
+async def create_user(data: UserCreate, current: dict = Depends(require_admin)):
     email = data.email.lower()
-    if await db.users.find_one({"email": email}):
+    if await master_db.user_index.find_one({"email": email}):
         raise HTTPException(400, "Email already registered")
     if data.role not in ("admin", "committee", "resident"):
         raise HTTPException(400, "Invalid role")
@@ -559,6 +817,9 @@ async def create_user(data: UserCreate, _: dict = Depends(require_admin)):
         "created_at": now_iso(),
     }
     await db.users.insert_one(u)
+    await master_db.user_index.insert_one({
+        "email": email, "user_id": u["id"], "society_id": current["society_id"], "kind": "society"
+    })
     return clean(u)
 
 @api.patch("/users/{uid}")
@@ -578,9 +839,11 @@ async def update_user(uid: str, data: UserUpdate, _: dict = Depends(require_admi
 async def delete_user(uid: str, current: dict = Depends(require_admin)):
     if uid == current["id"]:
         raise HTTPException(400, "Cannot delete yourself")
-    res = await db.users.delete_one({"id": uid})
-    if res.deleted_count == 0:
+    doc = await db.users.find_one({"id": uid})
+    if not doc:
         raise HTTPException(404, "User not found")
+    await db.users.delete_one({"id": uid})
+    await master_db.user_index.delete_one({"email": doc["email"], "society_id": current["society_id"]})
     return {"ok": True}
 
 @api.post("/users/import-csv")
@@ -1617,11 +1880,78 @@ async def stats(user: dict = Depends(get_current_user)):
 # ---------- Startup ----------
 @app.on_event("startup")
 async def startup():
+    # Master DB indexes
+    await master_db.master_users.create_index("email", unique=True)
+    await master_db.master_users.create_index("id", unique=True)
+    await master_db.societies.create_index("id", unique=True)
+    await master_db.user_index.create_index("email", unique=True)
+
+    # Seed master super-admin
+    master_email = os.environ.get("MASTER_ADMIN_EMAIL", "master@maintyn.in").lower()
+    master_pw = os.environ.get("MASTER_ADMIN_PASSWORD", "Master@12345")
+    existing_master = await master_db.master_users.find_one({"email": master_email})
+    if not existing_master:
+        await master_db.master_users.insert_one({
+            "id": new_id(), "email": master_email, "name": "Maintyn Support",
+            "role": "super_admin", "password_hash": hash_password(master_pw),
+            "is_active": True, "created_at": now_iso(),
+        })
+        logger.info(f"Seeded master super-admin: {master_email}")
+
+    # Ensure a Default society exists, wrapping the legacy DB_NAME data (idempotent)
+    default_soc = await master_db.societies.find_one({"is_default": True})
+    if not default_soc:
+        default_id = new_id()
+        legacy_db_name = os.environ["DB_NAME"]
+        target_db_name = _db_name_for_society(default_id)
+        # Move legacy data by renaming (drop target if exists, then rename)
+        try:
+            existing_collections = await client[legacy_db_name].list_collection_names()
+        except Exception:
+            existing_collections = []
+        default_db_name = target_db_name
+        if existing_collections:
+            # Copy each collection into the new society DB (avoid renameCollection privileges)
+            src_db = client[legacy_db_name]
+            dst_db = client[target_db_name]
+            for coll_name in existing_collections:
+                src = src_db[coll_name]
+                dst = dst_db[coll_name]
+                async for doc in src.find({}):
+                    doc.pop("_id", None)
+                    try:
+                        await dst.insert_one(doc)
+                    except Exception:
+                        pass
+        # Rebuild user_index from the new society's users
+        sdb = client[default_db_name]
+        async for u in sdb.users.find({}, {"email": 1, "id": 1}):
+            try:
+                await master_db.user_index.insert_one({
+                    "email": u["email"], "user_id": u["id"], "society_id": default_id, "kind": "society"
+                })
+            except Exception:
+                pass
+        await master_db.societies.insert_one({
+            "id": default_id,
+            "name": os.environ.get("DEFAULT_SOCIETY_NAME", "Default Society"),
+            "db_name": default_db_name,
+            "status": "active",
+            "is_default": True,
+            "first_admin_email": os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower(),
+            "first_admin_name": "Admin",
+            "created_at": now_iso(),
+        })
+        logger.info(f"Migrated legacy data into Default society ({default_id})")
+        default_soc = await master_db.societies.find_one({"is_default": True})
+
+    # Seed default society admin (into the Default society DB)
+    default_id = default_soc["id"]
+    _current_db.set(_get_society_db(default_id))
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
     await db.flats.create_index("id", unique=True)
-    await db.invoices.create_index("id", unique=True)
-    await db.invoices.create_index("flat_id")
+    await db.invoices.create_index("id", unique=True); await db.invoices.create_index("flat_id")
     await db.expenses.create_index("id", unique=True)
     await db.complaints.create_index("id", unique=True)
     await db.announcements.create_index("id", unique=True)
@@ -1630,37 +1960,29 @@ async def startup():
     await db.password_reset_tokens.create_index("token", unique=True)
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.amenities.create_index("id", unique=True)
-    await db.bookings.create_index("id", unique=True)
-    await db.bookings.create_index([("amenity_id", 1), ("date", 1)])
+    await db.bookings.create_index("id", unique=True); await db.bookings.create_index([("amenity_id", 1), ("date", 1)])
     await db.bookings.create_index("user_id")
     await db.digest_runs.create_index("month", unique=True)
-    await db.utility_connections.create_index("id", unique=True)
-    await db.utility_connections.create_index("flat_id")
-    await db.utility_bills.create_index("id", unique=True)
-    await db.utility_bills.create_index("flat_id")
+    await db.utility_connections.create_index("id", unique=True); await db.utility_connections.create_index("flat_id")
+    await db.utility_bills.create_index("id", unique=True); await db.utility_bills.create_index("flat_id")
 
-    # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()
     admin_pw = os.environ.get("ADMIN_PASSWORD", "Admin@12345")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
-        await db.users.insert_one({
-            "id": new_id(),
-            "email": admin_email,
-            "password_hash": hash_password(admin_pw),
-            "name": "Admin",
-            "phone": None,
-            "role": "admin",
-            "flat_id": None,
-            "created_at": now_iso(),
-        })
-        logger.info(f"Seeded admin user: {admin_email}")
-    elif not verify_password(admin_pw, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
+        u = {
+            "id": new_id(), "email": admin_email, "password_hash": hash_password(admin_pw),
+            "name": "Admin", "phone": None, "role": "admin", "flat_id": None, "created_at": now_iso(),
+        }
+        await db.users.insert_one(u)
+        try:
+            await master_db.user_index.insert_one({"email": admin_email, "user_id": u["id"], "society_id": default_id, "kind": "society"})
+        except Exception:
+            pass
+        logger.info(f"Seeded default-society admin: {admin_email}")
 
     init_storage()
 
-    # Schedule monthly digest — 1st of each month at 09:00 UTC
     if not scheduler.running:
         scheduler.add_job(
             _scheduled_digest,
