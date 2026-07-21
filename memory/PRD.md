@@ -99,6 +99,17 @@ Society Facility Management app for both committee members and residents. Commit
 - **Server split (partial)**: `server.py` (was 2409 lines) trimmed to ~2046 by moving Staff, Complaints, and Dashboards (invoice_stats, expense_stats, remind_defaulters) into `/app/backend/routes/{staff,complaints,dashboards}.py`. Each route module exposes a `_mount(app_module)` hook that wires FastAPI handlers using symbols imported at runtime from server.py — sidesteps circular imports. Router included via `api.include_router(...)` at the bottom of `server.py`.
 - Backend regression: 45/45 pytest passing (`tests/test_m416_followup.py`, `tests/test_staff_and_dashboards.py`).
 
+### 2026-07-21 (Iteration 12 · Auto-applied late-payment penalty)
+- **Society settings → Penalty tab**: admins toggle `penalty_enabled`, pick mode (`fixed` = one-time or `per_day` = accrues per day past due), set `penalty_amount` and optional `penalty_max` cap. Live preview + informational copy.
+- **Backend `_compute_penalty(inv, society)`**: dynamic penalty calc — 0 if not past due; principal untouched. Fixed mode adds one-time amount; per_day multiplies days-late × amount; `penalty_max` caps per_day if > 0.
+- **Invoice enrichment**: `GET /api/invoices` now returns each row with `penalty` and `total_due` fields.
+- **Freeze on payment**: `POST /api/invoices/{id}/pay` stores `penalty_snapshot` on the doc at the moment paid — so receipts and audits are stable, even if config changes later.
+- **Receipt email**: renders a "Late fee" + "Total paid" row when `penalty_snapshot > 0`.
+- **Dunning email**: table gains a "Late fee" column when penalty is enabled; intro summarises `principal + late fees = total`.
+- **Invoice dashboard stats**: `pending.total = principal + live penalty`, plus `pending.principal`, `pending.penalty`, `pending.count`. Defaulters carry `amount`/`penalty`/`total_due` and are sorted by `total_due` desc. `penalty_config` snapshot returned on the response.
+- **InvoiceView & Invoices page**: extra "Late fee" column on table; "Total ₹X" hint below status when unpaid+penalty; InvoiceView line-item includes `Late-payment fee` row + Total label switches to `Total due` / `Total paid`.
+- Backend regression: 13/13 pytest passing (`tests/test_penalty.py`).
+
 ## Notes
 - **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
 - **Multi-society setup**: fully done via master console — no need for separate deployments.
