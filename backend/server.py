@@ -1350,7 +1350,10 @@ async def _compute_digest_payload(target_month_anchor: _date) -> dict:
     inv_unpaid_count = 0
     collected = 0.0
     pending = 0.0
-    async for inv in db.invoices.find({"created_at": {"$gte": start_iso, "$lt": next_start_iso}}):
+    async for inv in db.invoices.find(
+        {"created_at": {"$gte": start_iso, "$lt": next_start_iso}},
+        {"status": 1, "amount": 1, "_id": 0}
+    ):
         if inv["status"] == "paid":
             inv_paid_count += 1
             collected += float(inv["amount"])
@@ -1361,14 +1364,17 @@ async def _compute_digest_payload(target_month_anchor: _date) -> dict:
     collection_pct = int(round((inv_paid_count / total_invoices) * 100)) if total_invoices else 0
 
     # Complaints resolved this month (resolved_at falls in month)
-    resolved_count = 0
-    async for c in db.complaints.find({"status": "resolved", "resolved_at": {"$gte": start_iso, "$lt": next_start_iso}}):
-        resolved_count += 1
+    resolved_count = await db.complaints.count_documents(
+        {"status": "resolved", "resolved_at": {"$gte": start_iso, "$lt": next_start_iso}}
+    )
     open_now = await db.complaints.count_documents({"status": {"$in": ["open", "in_progress"]}})
 
     # Expenses in month
     expenses_total = 0.0
-    async for e in db.expenses.find({"date": {"$gte": start_iso, "$lt": next_start_iso}}):
+    async for e in db.expenses.find(
+        {"date": {"$gte": start_iso, "$lt": next_start_iso}},
+        {"amount": 1, "_id": 0}
+    ):
         expenses_total += float(e["amount"])
 
     # Upcoming bookings (from tomorrow, next 30 days)
@@ -1530,13 +1536,13 @@ async def stats(user: dict = Depends(get_current_user)):
     # Sum unpaid amount
     total_collected = 0.0
     total_pending = 0.0
-    async for inv in db.invoices.find({}):
+    async for inv in db.invoices.find({}, {"status": 1, "amount": 1, "_id": 0}):
         if inv["status"] == "paid":
             total_collected += float(inv["amount"])
         else:
             total_pending += float(inv["amount"])
     total_expenses = 0.0
-    async for e in db.expenses.find({}):
+    async for e in db.expenses.find({}, {"amount": 1, "_id": 0}):
         total_expenses += float(e["amount"])
 
     active_visitors = await db.visitors.count_documents({"check_out": None})
@@ -1554,7 +1560,7 @@ async def stats(user: dict = Depends(get_current_user)):
         if user.get("flat_id"):
             my_unpaid = await db.invoices.count_documents({"flat_id": user["flat_id"], "status": "unpaid"})
             my_pending_amount = 0.0
-            async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}):
+            async for inv in db.invoices.find({"flat_id": user["flat_id"], "status": "unpaid"}, {"amount": 1, "_id": 0}):
                 my_pending_amount += float(inv["amount"])
             resident_data["my_unpaid_count"] = my_unpaid
             resident_data["my_pending_amount"] = my_pending_amount
