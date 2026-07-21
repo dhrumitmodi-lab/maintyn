@@ -22,35 +22,33 @@ Society Facility Management app for both committee members and residents. Commit
 2. **Committee** — manage flats/invoices/expenses/complaints/notices; cannot delete users
 3. **Resident** — sees own invoices/complaints, community notices, can log visitors, raise complaints
 
-## What's Implemented (2026-02-21)
+## What's Implemented
+### 2026-02-21 (Initial MVP)
 - JWT auth: /login, /register (self-signup as resident), /logout, /me
 - Admin seeded on startup (admin@maintyn.app / Admin@12345)
-- Users CRUD (admin only for delete)
-- Flats CRUD (staff)
-- Invoices: create single, bulk-for-all-flats, mark paid, delete, filter by status
-- Expenses: create + delete, optional receipt upload (Emergent object storage), download via ?auth=<token>
-- Complaints: raise, staff updates status (open/in_progress/resolved), Kanban-style board
-- Announcements: staff post + delete, all view
-- Visitors: log entry, check-out, role-scoped view
-- Dashboard: role-based stats + recent invoices + latest notices
-- Landing page with hero + features grid
+- Users, Flats, Invoices, Expenses, Complaints, Announcements, Visitors — all CRUD
+- Invoices: bulk-for-all-flats, mark paid, filter by status
+- Expenses: with receipt upload via Emergent object storage
+- Complaints: Kanban board with status transitions
+- Role-based dashboard + landing page
+
+### 2026-02-21 (Iteration 2)
+- Password reset via Resend email: /api/auth/forgot-password, /api/auth/reset-password
+- Frontend pages /forgot-password and /reset-password
+- Email notifications on: password reset request, invoice raised (single & bulk), complaint status change
+- CSV bulk import for flats: POST /api/flats/import-csv
+- CSV bulk import for residents: POST /api/users/import-csv (links to flat via block+flat_number)
+- Reusable CsvImport dialog with template download
 
 ## Prioritized Backlog
-### P0 (Ready)
-- ~~All core modules functional end-to-end~~ ✅
-
 ### P1 (Next iteration)
-- Payment gateway integration (Stripe / Razorpay) — user indicated this is next step
-- Password reset / forgot password flow
-- Email notifications (invoice raised, complaint status change) via Resend
-- Bulk import (residents & flats via CSV)
+- Payment gateway integration (Stripe / Razorpay)
+- Amenity booking module (clubhouse, community hall)
 
 ### P2 (Later)
 - Rich resident profile (vehicle, family members)
-- Amenity booking (clubhouse, community hall)
-- Polls / voting for AGM decisions
-- Society-level branding (upload logo, name)
-- Multi-society tenancy (SaaS mode)
+- Polls / voting for AGM
+- Society-level branding & multi-society tenancy
 - Analytics: month-over-month collection rate, expense category breakdown
 
 ## Test Credentials
