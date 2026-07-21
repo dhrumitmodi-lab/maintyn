@@ -47,12 +47,14 @@ export default function InvoiceView() {
 
     if (!invoice) return <div className="p-6 text-brand-inkSoft text-sm">Loading invoice…</div>;
 
+    const penalty = Number(invoice.penalty || 0);
+    const totalDue = Number(invoice.total_due ?? invoice.amount);
     const logoUrl = fileDownloadUrl(society?.logo_file_id);
     const qrUploadedUrl = fileDownloadUrl(society?.upi_qr_file_id);
     const upiIntent = buildUpiIntent(
         society?.upi_id,
         society?.name,
-        invoice.status === "paid" ? null : invoice.amount,
+        invoice.status === "paid" ? null : totalDue,
         `${invoice.description} ${invoice.month}`
     );
     const invoiceNumber = `INV-${(invoice.id || "").slice(0, 8).toUpperCase()}`;
@@ -142,11 +144,22 @@ export default function InvoiceView() {
                                 <td className="py-3 text-brand-ink">{invoice.description}</td>
                                 <td className="py-3 text-right font-heading text-brand-ink">{inr(invoice.amount)}</td>
                             </tr>
+                            {penalty > 0 && (
+                                <tr data-testid="invoice-penalty-row">
+                                    <td className="py-3 text-[#7A2A18]">
+                                        Late-payment fee
+                                        <span className="block text-[10px] uppercase tracking-overline text-brand-inkSoft mt-0.5">
+                                            {invoice.status === "paid" ? "Frozen at time of payment" : `Overdue past ${invoice.due_date}`}
+                                        </span>
+                                    </td>
+                                    <td className="py-3 text-right font-heading text-[#7A2A18]">{inr(penalty)}</td>
+                                </tr>
+                            )}
                         </tbody>
                         <tfoot>
                             <tr className="border-t border-brand-ink">
-                                <td className="pt-4 font-heading text-brand-ink">Total</td>
-                                <td className="pt-4 text-right font-heading text-2xl text-brand-ink" data-testid="invoice-total">{inr(invoice.amount)}</td>
+                                <td className="pt-4 font-heading text-brand-ink">Total {invoice.status === "paid" ? "paid" : "due"}</td>
+                                <td className="pt-4 text-right font-heading text-2xl text-brand-ink" data-testid="invoice-total">{inr(totalDue)}</td>
                             </tr>
                         </tfoot>
                     </table>

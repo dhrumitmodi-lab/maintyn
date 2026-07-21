@@ -1,0 +1,24 @@
+{
+  "summary": "Verified new auto-applied late-payment PENALTY feature end-to-end. Backend: 13/13 pytest passing in test_penalty.py — (a) PATCH /api/society accepts penalty_enabled/penalty_mode/penalty_amount/penalty_max; invalid mode 'xyz' → 400; negative amount → 400; negative max → 400; values persist across GET. (b) GET /api/invoices enriches every doc with `penalty` and `total_due`: fixed mode adds one-time ₹amount past due; per_day multiplies days_late × amount; max cap enforced (200 → 50 with cap=50); penalty_enabled=false yields 0 but keys remain. (c) POST /api/invoices/{id}/pay freezes penalty_snapshot at that moment — verified per_day 10 × 15 days late = 150, and paid invoice keeps snapshot even after penalty is later disabled globally. (d) /api/invoices/stats returns pending.principal + pending.penalty + pending.total, penalty_config snapshot, and defaulters entries with amount/penalty/total_due. (e) /api/invoices/defaulters/remind targets specified flats. Frontend (Playwright on preview URL): SocietySettingsDialog Penalty tab renders — settings-tab-penalty, penalty-enabled-toggle, penalty-mode-fixed / penalty-mode-per_day, penalty-amount-input, penalty-max-input all present; live preview updates; saving persists (set fixed=250 → reopened dialog and got 250). Invoices page shows: Defaulters table columns exactly ['Flat','Residents','Unpaid','Months pending','Principal','Late fee','Total due',''] with A-101 row (₹6,500 principal + ₹4,590 late fee = ₹11,090 total); main table adds 'Late fee' column and shows penalty per row. InvoiceView.jsx renders invoice-penalty-row for both paid (label 'Late-payment fee · Frozen at time of payment', Total paid ₹X) and unpaid overdue (label 'Late-payment fee · Overdue past DATE', Total due ₹X). Regression: existing test_m416_followup.py + test_society_invoice_payment.py pass except one unrelated file-download test (404 on TEST_receipt file download — pre-existing, not caused by this feature).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_penalty.py",
+    "/app/test_reports/pytest/iter12_penalty.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "_compute_penalty in server.py is duplicated in behaviour with the enrichment step; consider centralising penalty math (currently OK — one function called from three places, good).",
+    "In routes/dashboards.py invoice_stats: unpaid_docs.to_list(5000) is a hard limit — for very large societies with >5000 unpaid invoices, pending totals would be truncated. Consider aggregation-side computation or an unbounded cursor.",
+    "penalty_snapshot is only stored on the paid transition. If an admin edits the invoice amount after payment, penalty_snapshot stays stale — acceptable, but worth documenting.",
+    "In SocietySettingsDialog live preview: when penalty_max is only meaningful for per_day, its input is still editable in fixed mode (label helpfully says 'ignored for fixed'). Could disable the field when mode=fixed for clarity.",
+    "Test_society_invoice_payment.py has one pre-existing failing test (TestFileUploadDownload::test_upload_png_and_download → 404 on download) unrelated to penalty feature. Flag for a future iteration."
+  ],
+  "updated_files": ["/app/backend/tests/test_penalty.py"],
+  "success_rate": {"backend": "100% (13/13 new penalty tests; 33/34 broader regression, 1 unrelated pre-existing failure)", "frontend": "100%"},
+  "test_credentials": "admin@maintyn.app / Admin@12345",
+  "seed_data_creation": "Inserted 1 TEST_UI_DEFAULTER unpaid invoice (110 days old, ₹1,500) for A-101 so the Defaulters section is non-empty in the UI. All TEST_-prefixed invoices were cleaned up after run. Final DB state: penalty_enabled=true, mode=per_day, amount=10, max=0 (as request said final state doesn't matter).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Regression suite now includes /app/backend/tests/test_penalty.py — 13 tests covering society PATCH validation, penalty computation (fixed/per_day/cap/disabled), pay freezes snapshot, and stats shape. Run with: pytest backend/tests/test_penalty.py -o 'addopts=' (pytest.ini uses xdist which requires override for single-file runs). The test file reads MONGO_URL / REACT_APP_BACKEND_URL from /app/backend/.env and /app/frontend/.env directly. Pre-existing failing test test_upload_png_and_download in test_society_invoice_payment.py is not caused by this feature — flagged for investigation."
+}

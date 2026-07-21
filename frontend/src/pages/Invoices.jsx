@@ -165,7 +165,7 @@ export default function Invoices() {
                                 <table className="w-full text-sm">
                                     <thead>
                                         <tr className="bg-brand-bg border-b border-brand-line text-left">
-                                            {["Flat", "Residents", "Unpaid", "Months pending", "Total due", ""].map(h => (
+                                            {["Flat", "Residents", "Unpaid", "Months pending", "Principal", "Late fee", "Total due", ""].map(h => (
                                                 <th key={h} className="py-2 px-3 font-medium text-brand-inkSoft text-[10px] uppercase tracking-overline">{h}</th>
                                             ))}
                                         </tr>
@@ -181,6 +181,8 @@ export default function Invoices() {
                                                 <td className="py-2 px-3 text-brand-inkSoft">{d.unpaid_count}</td>
                                                 <td className="py-2 px-3"><Chip variant="danger">{d.months_pending}mo</Chip></td>
                                                 <td className="py-2 px-3 font-heading text-brand-ink">{inr(d.amount)}</td>
+                                                <td className="py-2 px-3 text-[#7A2A18] font-heading">{(d.penalty || 0) > 0 ? inr(d.penalty) : "—"}</td>
+                                                <td className="py-2 px-3 font-heading text-brand-ink">{inr(d.total_due ?? d.amount)}</td>
                                                 <td className="py-2 px-3 text-right">
                                                     <button
                                                         data-testid={`remind-defaulter-${d.flat_id}`}
@@ -219,20 +221,33 @@ export default function Invoices() {
                     <table className="w-full text-sm">
                         <thead>
                             <tr className="bg-brand-bg border-b border-brand-line text-left">
-                                {["Flat", "Description", "Month", "Amount", "Due", "Status", ""].map(h => (
+                                {["Flat", "Description", "Month", "Amount", "Late fee", "Due", "Status", ""].map(h => (
                                     <th key={h} className="py-3 px-4 font-medium text-brand-inkSoft text-[10px] uppercase tracking-overline">{h}</th>
                                 ))}
                             </tr>
                         </thead>
                         <tbody>
-                            {filtered.map((inv) => (
+                            {filtered.map((inv) => {
+                                const penalty = Number(inv.penalty || 0);
+                                const totalDue = Number(inv.total_due || inv.amount || 0);
+                                return (
                                 <tr key={inv.id} className="border-b border-brand-line/60 hover:bg-brand-bg/50">
                                     <td className="py-3 px-4 font-medium text-brand-ink">{inv.flat ? `${inv.flat.block}-${inv.flat.number}` : "—"}</td>
                                     <td className="py-3 px-4 text-brand-inkSoft">{inv.description}</td>
                                     <td className="py-3 px-4 text-brand-inkSoft">{inv.month}</td>
                                     <td className="py-3 px-4 font-heading text-brand-ink">{inr(inv.amount)}</td>
+                                    <td className="py-3 px-4" data-testid={`invoice-penalty-${inv.id}`}>
+                                        {penalty > 0 ? (
+                                            <span className="text-[#7A2A18] font-heading">{inr(penalty)}</span>
+                                        ) : <span className="text-brand-inkSoft">—</span>}
+                                    </td>
                                     <td className="py-3 px-4 text-brand-inkSoft">{inv.due_date}</td>
-                                    <td className="py-3 px-4"><Chip variant={inv.status === "paid" ? "success" : "warn"}>{inv.status}</Chip></td>
+                                    <td className="py-3 px-4">
+                                        <Chip variant={inv.status === "paid" ? "success" : "warn"}>{inv.status}</Chip>
+                                        {penalty > 0 && inv.status !== "paid" && (
+                                            <div className="text-[10px] uppercase tracking-overline text-[#7A2A18] mt-1">Total {inr(totalDue)}</div>
+                                        )}
+                                    </td>
                                     <td className="py-3 px-4 text-right">
                                         <button data-testid={`view-invoice-${inv.id}`} onClick={() => nav(`/app/invoices/${inv.id}`)}
                                             className="text-brand-ink hover:text-brand-action text-xs font-medium inline-flex items-center gap-1 mr-3">
@@ -246,7 +261,8 @@ export default function Invoices() {
                                         )}
                                     </td>
                                 </tr>
-                            ))}
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>

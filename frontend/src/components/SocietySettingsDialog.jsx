@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { UploadSimple, Trash, Bank, QrCode, House } from "@phosphor-icons/react";
+import { UploadSimple, Trash, Bank, QrCode, House, WarningOctagon } from "@phosphor-icons/react";
 import { toast } from "sonner";
 
 export default function SocietySettingsDialog({ open, onOpenChange }) {
@@ -17,6 +17,7 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
         contact_email: "", contact_phone: "",
         logo_file_id: "", upi_id: "", upi_qr_file_id: "",
         bank_name: "", bank_account_number: "", bank_account_holder: "", bank_ifsc: "",
+        penalty_enabled: false, penalty_mode: "fixed", penalty_amount: "", penalty_max: "",
     });
     const [busy, setBusy] = useState(false);
     const [uploading, setUploading] = useState({ logo: false, qr: false });
@@ -39,6 +40,10 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
                 bank_account_number: society.bank_account_number || "",
                 bank_account_holder: society.bank_account_holder || "",
                 bank_ifsc: society.bank_ifsc || "",
+                penalty_enabled: !!society.penalty_enabled,
+                penalty_mode: society.penalty_mode || "fixed",
+                penalty_amount: society.penalty_amount ?? "",
+                penalty_max: society.penalty_max ?? "",
             });
         }
     }, [open, society]);
@@ -93,6 +98,9 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
                             </TabsTrigger>
                             <TabsTrigger data-testid="settings-tab-bank" value="bank" className="rounded-full data-[state=active]:bg-brand-ink data-[state=active]:text-white px-4">
                                 <Bank size={14} className="mr-1.5" /> Bank
+                            </TabsTrigger>
+                            <TabsTrigger data-testid="settings-tab-penalty" value="penalty" className="rounded-full data-[state=active]:bg-brand-ink data-[state=active]:text-white px-4">
+                                <WarningOctagon size={14} className="mr-1.5" /> Penalty
                             </TabsTrigger>
                         </TabsList>
 
@@ -235,6 +243,95 @@ export default function SocietySettingsDialog({ open, onOpenChange }) {
                                     onChange={(e) => setForm({ ...form, bank_account_number: e.target.value })}
                                     placeholder="0123 4567 8901 2345"
                                     className="rounded-sm border-brand-line h-11 font-mono" />
+                            </div>
+                        </TabsContent>
+
+                        <TabsContent value="penalty" className="space-y-4">
+                            <div className="bg-brand-sage/40 border border-brand-line rounded-sm p-4">
+                                <p className="text-sm text-brand-ink">
+                                    Auto-apply a late fee once an invoice crosses its due date. Choose a one-time fixed amount, or an amount that accrues per day of delay.
+                                </p>
+                            </div>
+
+                            <label className="flex items-center gap-3 cursor-pointer select-none">
+                                <input
+                                    data-testid="penalty-enabled-toggle"
+                                    type="checkbox"
+                                    checked={form.penalty_enabled}
+                                    onChange={(e) => setForm({ ...form, penalty_enabled: e.target.checked })}
+                                    className="h-4 w-4"
+                                />
+                                <span className="text-sm text-brand-ink font-medium">Enable late-payment penalty</span>
+                            </label>
+
+                            <div className={form.penalty_enabled ? "space-y-4" : "space-y-4 opacity-50 pointer-events-none"}>
+                                <div className="space-y-2">
+                                    <Label>Penalty mode</Label>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {[
+                                            { v: "fixed", label: "Fixed", hint: "One-time fee once overdue" },
+                                            { v: "per_day", label: "Per day", hint: "Accrues each day past due date" },
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.v}
+                                                type="button"
+                                                data-testid={`penalty-mode-${opt.v}`}
+                                                onClick={() => setForm({ ...form, penalty_mode: opt.v })}
+                                                className={`rounded-sm border p-3 text-left transition-colors ${
+                                                    form.penalty_mode === opt.v
+                                                        ? "border-brand-ink bg-brand-ink text-white"
+                                                        : "border-brand-line bg-white text-brand-ink hover:border-brand-ink"
+                                                }`}
+                                            >
+                                                <p className="font-heading text-base">{opt.label}</p>
+                                                <p className={`text-xs mt-0.5 ${form.penalty_mode === opt.v ? "text-white/70" : "text-brand-inkSoft"}`}>{opt.hint}</p>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-2">
+                                        <Label>{form.penalty_mode === "per_day" ? "Amount per day (₹)" : "Fixed amount (₹)"}</Label>
+                                        <Input
+                                            data-testid="penalty-amount-input"
+                                            type="number"
+                                            min={0}
+                                            step="0.01"
+                                            value={form.penalty_amount}
+                                            onChange={(e) => setForm({ ...form, penalty_amount: e.target.value })}
+                                            placeholder={form.penalty_mode === "per_day" ? "10" : "100"}
+                                            className="rounded-sm border-brand-line h-11 font-mono"
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <Label>Max cap (₹) {form.penalty_mode === "fixed" && <span className="text-xs text-brand-inkSoft">— ignored for fixed</span>}</Label>
+                                        <Input
+                                            data-testid="penalty-max-input"
+                                            type="number"
+                                            min={0}
+                                            step="0.01"
+                                            value={form.penalty_max}
+                                            onChange={(e) => setForm({ ...form, penalty_max: e.target.value })}
+                                            placeholder="0 = no cap"
+                                            className="rounded-sm border-brand-line h-11 font-mono"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="bg-white border border-brand-line rounded-sm p-3 text-xs text-brand-inkSoft">
+                                    <p className="text-brand-ink font-medium mb-1">Preview</p>
+                                    {form.penalty_enabled && Number(form.penalty_amount) > 0 ? (
+                                        form.penalty_mode === "fixed" ? (
+                                            <p>An overdue invoice gets a one-time <b>₹{Number(form.penalty_amount).toLocaleString("en-IN")}</b> late fee added.</p>
+                                        ) : (
+                                            <p>An overdue invoice accrues <b>₹{Number(form.penalty_amount).toLocaleString("en-IN")}/day</b>{Number(form.penalty_max) > 0 ? <> capped at <b>₹{Number(form.penalty_max).toLocaleString("en-IN")}</b></> : ""}.</p>
+                                        )
+                                    ) : (
+                                        <p>No penalty will be applied.</p>
+                                    )}
+                                    <p className="mt-2">The late fee is frozen on the invoice at the moment it's marked paid, so residents & auditors see the exact amount collected.</p>
+                                </div>
                             </div>
                         </TabsContent>
                     </Tabs>

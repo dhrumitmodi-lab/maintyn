@@ -341,6 +341,10 @@ class SocietyIn(BaseModel):
     bank_account_number: Optional[str] = None
     bank_account_holder: Optional[str] = None
     bank_ifsc: Optional[str] = None
+    penalty_enabled: Optional[bool] = None
+    penalty_mode: Optional[str] = None  # "fixed" | "per_day"
+    penalty_amount: Optional[float] = None
+    penalty_max: Optional[float] = None  # optional cap for per_day mode (₹0 = no cap)
 
 UTILITY_TYPES = ("electricity", "piped_gas", "water", "internet", "dth", "other")
 
@@ -482,6 +486,7 @@ SOCIETY_DEFAULTS = {
     "contact_email": None, "contact_phone": None,
     "logo_file_id": None, "upi_id": None, "upi_qr_file_id": None,
     "bank_name": None, "bank_account_number": None, "bank_account_holder": None, "bank_ifsc": None,
+    "penalty_enabled": False, "penalty_mode": "fixed", "penalty_amount": 0.0, "penalty_max": 0.0,
     "is_setup": False,
 }
 
@@ -513,6 +518,15 @@ async def update_society(data: SocietyIn, _: dict = Depends(require_admin)):
     if "name" in payload:
         if payload["name"] is None or str(payload["name"]).strip() == "":
             raise HTTPException(400, "Society name cannot be empty")
+    if "penalty_mode" in payload and payload["penalty_mode"] not in (None, "fixed", "per_day"):
+        raise HTTPException(400, "penalty_mode must be 'fixed' or 'per_day'")
+    for k in ("penalty_amount", "penalty_max"):
+        if k in payload and payload[k] is not None:
+            try:
+                if float(payload[k]) < 0:
+                    raise HTTPException(400, f"{k} must be non-negative")
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{k} must be a number")
     upd = {}
     for k, v in payload.items():
         upd[k] = None if v == "" else v
@@ -1198,6 +1212,13 @@ async def _notify_invoice_paid(invoice_id: str):
         paid_date_str = paid_when[:10]
     receipt_no = f"RCPT-{invoice_id[:8].upper()}"
     subject = f"Payment receipt · {inv.get('description', 'Invoice')}"
+    principal = float(inv.get("amount", 0))
+    penalty = float(inv.get("penalty_snapshot") or 0.0)
+    total_paid = principal + penalty
+    penalty_row = (
+        f"<tr><td style='color:#576B61'>Late fee</td><td><b>₹{penalty:,.0f}</b></td></tr>"
+        f"<tr><td style='color:#576B61'>Total paid</td><td><b>₹{total_paid:,.0f}</b></td></tr>"
+    ) if penalty > 0 else ""
     for r in residents:
         body = (
             f"<p>Hi {r['name']},</p>"
@@ -1205,7 +1226,8 @@ async def _notify_invoice_paid(invoice_id: str):
             f"<table cellpadding='6' style='border-collapse:collapse;font-size:14px;margin:12px 0;width:100%'>"
             f"<tr><td style='color:#576B61'>Receipt number</td><td><b>{receipt_no}</b></td></tr>"
             f"<tr><td style='color:#576B61'>Description</td><td><b>{inv.get('description','')}</b></td></tr>"
-            f"<tr><td style='color:#576B61'>Amount paid</td><td><b>₹{float(inv.get('amount',0)):,.0f}</b></td></tr>"
+            f"<tr><td style='color:#576B61'>Amount</td><td><b>₹{principal:,.0f}</b></td></tr>"
+            f"{penalty_row}"
             f"<tr><td style='color:#576B61'>Month</td><td>{inv.get('month','')}</td></tr>"
             f"<tr><td style='color:#576B61'>Payment method</td><td>{(inv.get('payment_method') or 'manual').replace('_',' ').title()}</td></tr>"
             f"<tr><td style='color:#576B61'>Paid on</td><td>{paid_date_str}</td></tr>"
@@ -1228,6 +1250,49 @@ async def _notify_complaint_status(complaint: dict, new_status: str):
     html = _email_frame(f"Complaint {label}", body, f"{FRONTEND_URL}/app/complaints", "View complaint")
     await send_email_raw(user["email"], f"Complaint update: {complaint['title']}", html)
 
+# ---------- Penalty helpers ----------
+def _compute_penalty(inv: dict, society: dict) -> float:
+    """Return the current penalty owed on this invoice.
+    - Paid invoices return the frozen `penalty_snapshot` (or 0 if none was applied).
+    - Unpaid invoices compute live: 0 if not past due_date; else based on society config.
+    """
+    if inv.get("status") == "paid":
+        return float(inv.get("penalty_snapshot") or 0.0)
+    if not society or not society.get("penalty_enabled"):
+        return 0.0
+    mode = society.get("penalty_mode") or "fixed"
+    amount = float(society.get("penalty_amount") or 0.0)
+    if amount <= 0:
+        return 0.0
+    due_raw = inv.get("due_date")
+    if not due_raw:
+        return 0.0
+    try:
+        due = _date.fromisoformat(str(due_raw)[:10])
+    except Exception:
+        return 0.0
+    today = _date.today()
+    if today <= due:
+        return 0.0
+    if mode == "fixed":
+        penalty = amount
+    else:  # per_day
+        days_late = (today - due).days
+        penalty = amount * days_late
+    max_cap = float(society.get("penalty_max") or 0.0)
+    if max_cap > 0:
+        penalty = min(penalty, max_cap)
+    return round(penalty, 2)
+
+async def _enrich_invoice_penalties(docs: list) -> list:
+    """Populate `penalty` and `total_due` fields on each invoice doc based on society config."""
+    society = await _get_society()
+    for d in docs:
+        p = _compute_penalty(d, society)
+        d["penalty"] = p
+        d["total_due"] = round(float(d.get("amount") or 0) + p, 2)
+    return docs
+
 @api.get("/invoices")
 async def list_invoices(user: dict = Depends(get_current_user)):
     query = {}
@@ -1240,6 +1305,7 @@ async def list_invoices(user: dict = Depends(get_current_user)):
     flats = await _flat_map([d.get("flat_id") for d in docs])
     for d in docs:
         d["flat"] = flats.get(d.get("flat_id"))
+    await _enrich_invoice_penalties(docs)
     return docs
 
 @api.post("/invoices")
@@ -1298,13 +1364,19 @@ async def mark_paid(iid: str, data: InvoicePay, background: BackgroundTasks, use
     if user["role"] == "resident" and inv["flat_id"] != user.get("flat_id"):
         raise HTTPException(403, "Not your invoice")
     was_unpaid = inv.get("status") != "paid"
+    # Freeze penalty snapshot at the moment of payment
+    society = await _get_society()
+    penalty_snapshot = _compute_penalty(inv, society) if was_unpaid else float(inv.get("penalty_snapshot") or 0.0)
     await db.invoices.update_one({"id": iid}, {"$set": {
         "status": "paid",
         "paid_at": now_iso(),
         "payment_method": data.method,
         "payment_note": data.note,
+        "penalty_snapshot": penalty_snapshot,
     }})
     doc = await db.invoices.find_one({"id": iid}, {"_id": 0})
+    doc["penalty"] = float(doc.get("penalty_snapshot") or 0.0)
+    doc["total_due"] = round(float(doc.get("amount") or 0) + doc["penalty"], 2)
     if was_unpaid:
         background.add_task(_notify_invoice_paid, iid)
     return doc
