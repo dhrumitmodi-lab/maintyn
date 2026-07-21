@@ -263,7 +263,7 @@ class VisitorIn(BaseModel):
     vehicle_no: Optional[str] = None
 
 class SocietyIn(BaseModel):
-    name: str = Field(min_length=1)
+    name: Optional[str] = None
     address: Optional[str] = None
     city: Optional[str] = None
     established_year: Optional[int] = None
@@ -385,29 +385,28 @@ async def me(user: dict = Depends(get_current_user)):
 # ---------- Society settings ----------
 SOCIETY_ID = "singleton"
 
+SOCIETY_DEFAULTS = {
+    "name": None, "address": None, "city": None, "established_year": None,
+    "contact_email": None, "contact_phone": None,
+    "logo_file_id": None, "upi_id": None, "upi_qr_file_id": None,
+    "bank_name": None, "bank_account_number": None, "bank_account_holder": None, "bank_ifsc": None,
+    "is_setup": False,
+}
+
 async def _get_society():
     doc = await db.society.find_one({"id": SOCIETY_ID}, {"_id": 0})
     if not doc:
         doc = {
             "id": SOCIETY_ID,
+            **SOCIETY_DEFAULTS,
             "name": APP_NAME.capitalize() + " Society",
-            "address": None,
-            "city": None,
-            "established_year": None,
-            "contact_email": None,
-            "contact_phone": None,
-            "logo_file_id": None,
-            "upi_id": None,
-            "upi_qr_file_id": None,
-            "bank_name": None,
-            "bank_account_number": None,
-            "bank_account_holder": None,
-            "bank_ifsc": None,
-            "is_setup": False,
             "created_at": now_iso(),
         }
         await db.society.insert_one(doc)
         doc.pop("_id", None)
+        return doc
+    for k, v in SOCIETY_DEFAULTS.items():
+        doc.setdefault(k, v)
     return doc
 
 @api.get("/society")
@@ -416,9 +415,14 @@ async def get_society(_: dict = Depends(get_current_user)):
 
 @api.patch("/society")
 async def update_society(data: SocietyIn, _: dict = Depends(require_admin)):
-    """Update society settings. Explicit empty strings clear a value; missing fields are untouched."""
+    """Update society settings. Explicit empty strings clear a value; missing fields are untouched.
+    Name cannot be blanked to empty once set."""
+    payload = data.model_dump(exclude_unset=True)
+    if "name" in payload:
+        if payload["name"] is None or str(payload["name"]).strip() == "":
+            raise HTTPException(400, "Society name cannot be empty")
     upd = {}
-    for k, v in data.model_dump(exclude_unset=True).items():
+    for k, v in payload.items():
         upd[k] = None if v == "" else v
     upd["is_setup"] = True
     upd["updated_at"] = now_iso()

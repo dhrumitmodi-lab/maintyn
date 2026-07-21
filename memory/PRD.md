@@ -63,9 +63,22 @@ Society Facility Management app for both committee members and residents. Commit
 - **Utility bills**: track electricity / gas / water etc. per flat. `POST /api/utility-bills` (inherits provider+customer from connection if given), `POST /api/utility-bills/{id}/pay`, `DELETE /api/utility-bills/{id}`. Residents auto-scoped to own flat.
 - Helper `_can_access_flat` centralises "admin/committee always, resident only own flat".
 
+### 2026-02-21 (Iteration 8)
+- **Society branding on invoices**: logo, UPI ID (auto QR generation), custom QR upload, bank details (holder/name/A-no/IFSC).
+- Society settings dialog now uses a 3-tab layout: General (logo + address + contacts) / UPI / Bank.
+- **Printable invoice view** at `/app/invoices/:id` with society logo, invoice number, bill-to, line items, and a payment section that shows:
+  - Pay via UPI: auto-generated QR code (`react-qr-code`) encoding `upi://pay?pa=<vpa>&pn=<name>&am=<amount>&tn=<ref>` — or a custom uploaded QR takes precedence.
+  - Bank transfer: account holder / bank / IFSC / account no. with click-to-copy buttons.
+  - "Paid on <date>" badge shown instead when invoice.status='paid'.
+- **Society logo** shown in the sidebar header when uploaded (falls back to default SVG mark).
+- Backend `_get_society()` now merges default None for any missing keys on legacy docs; `PATCH /api/society` accepts partial payloads (name no longer required) but rejects blanking the name.
+
+## Notes
+- **Multi-society setup (per user choice B)**: Deploy this same repo 2 more times, each with its own `DB_NAME` env var and its own preview URL. Each deployment is fully isolated (its own MongoDB namespace, own admin, own users).
+
 ## Prioritized Backlog
 ### P1 (Next iteration)
-- Payment gateway (Stripe / Razorpay)
+- Payment gateway (Stripe / Razorpay) for online invoice payments
 
 ### P2 (Later)
 - Polls / voting for AGM decisions
