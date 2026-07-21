@@ -305,6 +305,16 @@ class StaffIn(BaseModel):
     notes: Optional[str] = None
     is_active: bool = True
 
+class StaffUpdate(BaseModel):
+    name: Optional[str] = None
+    role_label: Optional[str] = None
+    category: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    vendor_org: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
 class AnnouncementIn(BaseModel):
     title: str
     content: str
@@ -1299,95 +1309,6 @@ async def mark_paid(iid: str, data: InvoicePay, background: BackgroundTasks, use
         background.add_task(_notify_invoice_paid, iid)
     return doc
 
-@api.get("/invoices/stats")
-async def invoice_stats(_: dict = Depends(require_staff)):
-    """Dashboard totals for invoices + defaulter list (unpaid >3 months old)."""
-    raised_agg = await db.invoices.aggregate([
-        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
-    ]).to_list(1)
-    paid_agg = await db.invoices.aggregate([
-        {"$match": {"status": "paid"}},
-        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
-    ]).to_list(1)
-    unpaid_agg = await db.invoices.aggregate([
-        {"$match": {"status": "unpaid"}},
-        {"$group": {"_id": None, "total": {"$sum": "$amount"}, "count": {"$sum": 1}}}
-    ]).to_list(1)
-
-    raised_total = float(raised_agg[0]["total"]) if raised_agg else 0.0
-    raised_count = int(raised_agg[0]["count"]) if raised_agg else 0
-    received_total = float(paid_agg[0]["total"]) if paid_agg else 0.0
-    received_count = int(paid_agg[0]["count"]) if paid_agg else 0
-    pending_total = float(unpaid_agg[0]["total"]) if unpaid_agg else 0.0
-    pending_count = int(unpaid_agg[0]["count"]) if unpaid_agg else 0
-
-    collection_pct = int(round((received_total / raised_total) * 100)) if raised_total else 0
-
-    # Defaulters: flats with unpaid invoices where the OLDEST unpaid is >3 months old
-    threshold_iso = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-    per_flat = await db.invoices.aggregate([
-        {"$match": {"status": "unpaid"}},
-        {"$group": {
-            "_id": "$flat_id",
-            "unpaid_count": {"$sum": 1},
-            "amount": {"$sum": "$amount"},
-            "oldest": {"$min": "$created_at"},
-        }},
-        {"$match": {"oldest": {"$lte": threshold_iso}}},
-        {"$sort": {"amount": -1}},
-    ]).to_list(500)
-
-    flat_ids = [p["_id"] for p in per_flat if p.get("_id")]
-    flats_map = await _flat_map(flat_ids)
-    residents_by_flat = {}
-    if flat_ids:
-        async for r in db.users.find({"flat_id": {"$in": flat_ids}}, {"password_hash": 0, "_id": 0}):
-            residents_by_flat.setdefault(r["flat_id"], []).append(
-                {"id": r["id"], "name": r["name"], "email": r["email"], "phone": r.get("phone")}
-            )
-
-    now_utc = datetime.now(timezone.utc)
-    defaulters = []
-    for p in per_flat:
-        flat = flats_map.get(p["_id"])
-        if not flat:
-            continue
-        try:
-            oldest_dt = datetime.fromisoformat(p["oldest"].replace("Z", "+00:00"))
-        except Exception:
-            continue
-        months_pending = max(1, int((now_utc - oldest_dt).days // 30))
-        defaulters.append({
-            "flat_id": p["_id"],
-            "flat_label": f"{flat['block']}-{flat['number']}",
-            "unpaid_count": int(p["unpaid_count"]),
-            "amount": float(p["amount"]),
-            "oldest": p["oldest"],
-            "months_pending": months_pending,
-            "residents": residents_by_flat.get(p["_id"], []),
-        })
-
-    # Monthly trend (raised vs received) for last 6 months by invoice month field
-    trend_agg = await db.invoices.aggregate([
-        {"$group": {
-            "_id": "$month",
-            "raised": {"$sum": "$amount"},
-            "received": {"$sum": {"$cond": [{"$eq": ["$status", "paid"]}, "$amount", 0]}},
-        }},
-        {"$sort": {"_id": -1}},
-        {"$limit": 6},
-    ]).to_list(6)
-    trend = [{"month": t["_id"], "raised": float(t["raised"]), "received": float(t["received"])} for t in reversed(trend_agg)]
-
-    return {
-        "raised": {"total": raised_total, "count": raised_count},
-        "received": {"total": received_total, "count": received_count},
-        "pending": {"total": pending_total, "count": pending_count},
-        "collection_pct": collection_pct,
-        "defaulters": defaulters,
-        "trend": trend,
-    }
-
 @api.delete("/invoices/{iid}")
 async def delete_invoice(iid: str, _: dict = Depends(require_staff)):
     res = await db.invoices.delete_one({"id": iid})
@@ -1458,82 +1379,6 @@ async def create_expense(data: ExpenseIn, user: dict = Depends(require_staff)):
     exp.pop("_id", None)
     return exp
 
-@api.get("/expenses/stats")
-async def expense_stats(_: dict = Depends(require_staff)):
-    """Income (paid invoices) vs Spent (expenses) monthly for last 12 months + next-3-months projection."""
-    # We slice by 'month' field for income and 'date' first 7 chars for expenses.
-    # Build the last 12 month keys (YYYY-MM) including current month.
-    today = _date.today()
-    keys = []
-    y, m = today.year, today.month
-    for _ in range(12):
-        keys.append(f"{y:04d}-{m:02d}")
-        m -= 1
-        if m == 0:
-            m = 12
-            y -= 1
-    keys.reverse()  # oldest to newest
-    key_set = set(keys)
-
-    # Income by invoice month (only paid, grouped by month)
-    income_agg = await db.invoices.aggregate([
-        {"$match": {"status": "paid", "month": {"$in": list(key_set)}}},
-        {"$group": {"_id": "$month", "total": {"$sum": "$amount"}}}
-    ]).to_list(50)
-    income_map = {r["_id"]: float(r["total"]) for r in income_agg}
-
-    # Spent by expense date (substring 0..7 = YYYY-MM)
-    spent_agg = await db.expenses.aggregate([
-        {"$group": {"_id": {"$substr": ["$date", 0, 7]}, "total": {"$sum": "$amount"}}}
-    ]).to_list(200)
-    spent_map = {r["_id"]: float(r["total"]) for r in spent_agg if r["_id"] in key_set}
-
-    series = [
-        {"month": k, "income": round(income_map.get(k, 0.0), 2), "spent": round(spent_map.get(k, 0.0), 2)}
-        for k in keys
-    ]
-
-    # Simple projection: average income & spent of last 3 non-zero months (fallback all-months avg)
-    last3 = series[-3:]
-    def _avg(vals):
-        vals = [v for v in vals if v > 0]
-        return sum(vals) / len(vals) if vals else 0.0
-    proj_income = _avg([s["income"] for s in last3])
-    proj_spent = _avg([s["spent"] for s in last3])
-
-    # Next 3 month keys
-    ny, nm = today.year, today.month
-    proj_keys = []
-    for _ in range(3):
-        nm += 1
-        if nm == 13:
-            nm = 1
-            ny += 1
-        proj_keys.append(f"{ny:04d}-{nm:02d}")
-
-    projection = [{"month": k, "income": round(proj_income, 2), "spent": round(proj_spent, 2)} for k in proj_keys]
-
-    total_income = sum(s["income"] for s in series)
-    total_spent = sum(s["spent"] for s in series)
-    net = round(total_income - total_spent, 2)
-
-    # Category breakdown of expenses (this window)
-    cat_agg = await db.expenses.aggregate([
-        {"$match": {"date": {"$gte": keys[0] + "-01"}}},
-        {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
-        {"$sort": {"total": -1}}
-    ]).to_list(20)
-    categories = [{"category": r["_id"] or "other", "total": float(r["total"])} for r in cat_agg]
-
-    return {
-        "window": {"from": keys[0], "to": keys[-1]},
-        "series": series,
-        "projection": projection,
-        "totals": {"income": round(total_income, 2), "spent": round(total_spent, 2), "net": net},
-        "avg": {"income": round(proj_income, 2), "spent": round(proj_spent, 2)},
-        "categories": categories,
-    }
-
 @api.delete("/expenses/{eid}")
 async def delete_expense(eid: str, _: dict = Depends(require_staff)):
     res = await db.expenses.delete_one({"id": eid})
@@ -1542,129 +1387,6 @@ async def delete_expense(eid: str, _: dict = Depends(require_staff)):
     return {"ok": True}
 
 # ---------- Complaints ----------
-@api.get("/complaints")
-async def list_complaints(user: dict = Depends(get_current_user)):
-    query = {} if user["role"] in ("admin", "committee") else {"created_by": user["id"]}
-    docs = await db.complaints.find(query, {"_id": 0}).sort("created_at", -1).to_list(2000)
-    # Enrich with staff details
-    staff_ids = list({d["assigned_to"] for d in docs if d.get("assigned_to")})
-    staff_map = {}
-    if staff_ids:
-        async for s in db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0}):
-            staff_map[s["id"]] = {
-                "id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
-                "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org"),
-            }
-    for d in docs:
-        if d.get("assigned_to"):
-            d["assigned_staff"] = staff_map.get(d["assigned_to"])
-    return docs
-
-async def _auto_assign_staff(category: str) -> Optional[str]:
-    """Find first active staff matching this category. Returns staff id or None."""
-    s = await db.staff.find_one({"category": category, "is_active": True})
-    if s:
-        return s["id"]
-    return None
-
-@api.post("/complaints")
-async def create_complaint(data: ComplaintIn, user: dict = Depends(get_current_user)):
-    assigned = await _auto_assign_staff(data.category)
-    c = {
-        "id": new_id(),
-        **data.model_dump(),
-        "status": "open",
-        "created_by": user["id"],
-        "created_by_name": user["name"],
-        "flat_id": user.get("flat_id"),
-        "resolution_note": None,
-        "resolved_by": None,
-        "resolved_at": None,
-        "assigned_to": assigned,
-        "assigned_at": now_iso() if assigned else None,
-        "created_at": now_iso(),
-    }
-    await db.complaints.insert_one(c)
-    c.pop("_id", None)
-    if assigned:
-        s = await db.staff.find_one({"id": assigned}, {"_id": 0})
-        if s:
-            c["assigned_staff"] = {"id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
-                                     "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org")}
-    return c
-
-@api.patch("/complaints/{cid}")
-async def update_complaint(cid: str, data: ComplaintUpdate, background: BackgroundTasks, user: dict = Depends(require_staff)):
-    existing = await db.complaints.find_one({"id": cid})
-    if not existing:
-        raise HTTPException(404, "Complaint not found")
-    payload = data.model_dump(exclude_unset=True)
-    upd = {}
-    for k, v in payload.items():
-        if k == "assigned_to":
-            # empty string clears assignment; validate exists otherwise
-            if v is None or v == "":
-                upd["assigned_to"] = None
-                upd["assigned_at"] = None
-            else:
-                s = await db.staff.find_one({"id": v})
-                if not s:
-                    raise HTTPException(400, "Staff not found")
-                upd["assigned_to"] = v
-                upd["assigned_at"] = now_iso()
-        elif v is not None:
-            upd[k] = v
-    if upd.get("status") == "resolved":
-        upd["resolved_by"] = user["id"]
-        upd["resolved_at"] = now_iso()
-    if not upd:
-        raise HTTPException(400, "No changes")
-    await db.complaints.update_one({"id": cid}, {"$set": upd})
-    doc = await db.complaints.find_one({"id": cid}, {"_id": 0})
-    if doc.get("assigned_to"):
-        s = await db.staff.find_one({"id": doc["assigned_to"]}, {"_id": 0})
-        if s:
-            doc["assigned_staff"] = {"id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
-                                       "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org")}
-    if upd.get("status") and upd["status"] != existing.get("status"):
-        background.add_task(_notify_complaint_status, doc, upd["status"])
-    return doc
-
-# ---------- Staff / Vendors ----------
-@api.get("/staff")
-async def list_staff(user: dict = Depends(get_current_user), category: Optional[str] = None, active: Optional[bool] = None):
-    q = {}
-    if category:
-        q["category"] = category
-    if active is not None:
-        q["is_active"] = active
-    docs = await db.staff.find(q, {"_id": 0}).sort([("category", 1), ("name", 1)]).to_list(500)
-    return docs
-
-@api.post("/staff")
-async def create_staff(data: StaffIn, _: dict = Depends(require_staff)):
-    s = {"id": new_id(), **data.model_dump(), "created_at": now_iso()}
-    await db.staff.insert_one(s)
-    s.pop("_id", None)
-    return s
-
-@api.patch("/staff/{sid}")
-async def update_staff(sid: str, data: StaffIn, _: dict = Depends(require_staff)):
-    res = await db.staff.update_one({"id": sid}, {"$set": {**data.model_dump(), "updated_at": now_iso()}})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Staff not found")
-    return await db.staff.find_one({"id": sid}, {"_id": 0})
-
-@api.delete("/staff/{sid}")
-async def delete_staff(sid: str, _: dict = Depends(require_staff)):
-    res = await db.staff.delete_one({"id": sid})
-    if res.deleted_count == 0:
-        raise HTTPException(404, "Staff not found")
-    # Unassign complaints referring to this staff
-    await db.complaints.update_many({"assigned_to": sid}, {"$set": {"assigned_to": None, "assigned_at": None}})
-    return {"ok": True}
-
-# ---------- Announcements ----------
 @api.get("/announcements")
 async def list_announcements(_: dict = Depends(get_current_user)):
     docs = await db.announcements.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
@@ -2301,6 +2023,17 @@ async def shutdown():
     if scheduler.running:
         scheduler.shutdown(wait=False)
     client.close()
+
+# Mount split-out route modules onto the api router
+import sys as _sys
+from routes import staff as _routes_staff, complaints as _routes_complaints, dashboards as _routes_dashboards
+_this_module = _sys.modules[__name__]
+_routes_staff._mount(_this_module)
+_routes_complaints._mount(_this_module)
+_routes_dashboards._mount(_this_module)
+api.include_router(_routes_staff.router)
+api.include_router(_routes_complaints.router)
+api.include_router(_routes_dashboards.router)
 
 # Include router & CORS
 app.include_router(api)

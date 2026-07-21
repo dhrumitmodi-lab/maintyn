@@ -73,12 +73,7 @@ export default function Staff() {
 
     async function toggleActive(s) {
         try {
-            await api.patch(`/staff/${s.id}`, {
-                name: s.name, role_label: s.role_label, category: s.category,
-                phone: s.phone || null, email: s.email || null,
-                vendor_org: s.vendor_org || null, notes: s.notes || null,
-                is_active: !s.is_active,
-            });
+            await api.patch(`/staff/${s.id}`, { is_active: !s.is_active });
             load();
         } catch (e) { toast.error(formatError(e)); }
     }

@@ -1,0 +1,26 @@
+{
+  "summary": "M-416 follow-up verified end-to-end: (1) regression spot-check for all endpoints moved to routes/staff.py, routes/complaints.py, routes/dashboards.py + endpoints still in server.py — all 200. (2) Partial PATCH /api/staff/{id} accepts single-field payloads (is_active only, phone only) without erasing other fields; empty body returns 400. (3) Round-robin auto-assign: 3 active staff same category + 6 complaints → each staff picked exactly twice, first-3 and last-3 are permutations, last_auto_assigned_at is set on every staff. (4) POST /api/invoices/defaulters/remind: empty body targets all >90-day defaulters, flat_ids targets only those, custom subject/message honoured (verified via backend log). (5) Multi-tenant isolation: staff & stats routes scoped to society. Frontend: admin /app/invoices shows Defaulters section with 'Remind all' + per-row 'Remind' — both fire the endpoint (200, flats_targeted=1, emails_queued=3) and success toast appears. Backend: 45/45 pytest passing (28 new + 17 pre-existing). Frontend: verified via Playwright on preview URL.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_m416_followup.py",
+    "/app/backend/tests/test_staff_and_dashboards.py",
+    "/app/test_reports/pytest/iter11_m416_followup.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is still ~2047 lines even after the split. Consider moving invoices, expenses, amenities/bookings, and announcements to their own routers as a follow-up to fully realise the split-server refactor.",
+    "The _mount(app_module) pattern works but is fragile — a small typo in a symbol name only surfaces at request time. Consider a shared dependencies module (e.g. backend/deps.py) that the routers import directly, dropping the runtime injection.",
+    "routes/dashboards.py: _send_dunning_for_flat re-queries invoices even when payload provides flat_ids; for very large flat lists this is fine, but consider a bulk pipeline if dunning grows. Also each resident gets a separate send_email_raw call in a loop inside a BG task — one flat with N residents blocks the BG task N times sequentially; parallelising with asyncio.gather would be faster.",
+    "routes/complaints.py _auto_assign_staff: correct round-robin via (last_auto_assigned_at, created_at) sort — good. Minor: if two rapid POSTs land in the same millisecond, both may pick the same staff since the update_one is not atomic with the read. Acceptable for MVP; document as known limitation.",
+    "Partial PATCH staff correctly uses exclude_unset — but there is no validation preventing empty strings from unsetting fields (e.g. name=''). Consider tightening StaffUpdate with min_length=1 constraints where relevant.",
+    "DunningPayload allows arbitrary subject/message HTML — sanitize server-side to avoid HTML/link injection into outbound emails."
+  ],
+  "updated_files": ["/app/backend/tests/test_m416_followup.py"],
+  "success_rate": {"backend": "100% (45/45)", "frontend": "100%"},
+  "test_credentials": "admin@maintyn.app/Admin@12345, demo.resident@example.com/Resident@123, master@maintyn.in/Master@12345",
+  "seed_data_creation": "Temporarily inserted one 110-day-old unpaid invoice for A-101 to make defaulters non-empty for UI testing; deleted after the run. TEST_-prefixed staff/complaints created via fixtures were also cleaned up (staff deleted; complaints left — no delete endpoint).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "M-416 follow-up (round-robin, partial PATCH, defaulter dunning, server.py split) fully verified. Backend regression suite is now /app/backend/tests/test_m416_followup.py + /app/backend/tests/test_staff_and_dashboards.py — run both for regression on future iterations. The routes/*.py modules use a runtime _mount(app_module) injection pattern — do not break the import order at the bottom of server.py."
+}

@@ -8,7 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Trash, CheckCircle, Stack, Eye, WarningOctagon, TrendUp } from "@phosphor-icons/react";
+import { Plus, Trash, CheckCircle, Stack, Eye, WarningOctagon, TrendUp, PaperPlaneTilt } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 
@@ -68,6 +68,19 @@ export default function Invoices() {
         if (!confirm("Delete this invoice?")) return;
         try { await api.delete(`/invoices/${inv.id}`); toast.success("Deleted"); load(); }
         catch (e) { toast.error(formatError(e)); }
+    }
+    async function remindOne(d) {
+        try {
+            const { data } = await api.post("/invoices/defaulters/remind", { flat_ids: [d.flat_id] });
+            toast.success(`Reminder queued to ${data.emails_queued} resident(s) of ${d.flat_label}`);
+        } catch (e) { toast.error(formatError(e)); }
+    }
+    async function remindAll() {
+        if (!confirm(`Send reminder emails to all ${stats.defaulters.length} defaulter flat(s)?`)) return;
+        try {
+            const { data } = await api.post("/invoices/defaulters/remind", {});
+            toast.success(`Reminder queued to ${data.emails_queued} resident(s) across ${data.flats_targeted} flat(s)`);
+        } catch (e) { toast.error(formatError(e)); }
     }
 
     const filtered = invoices.filter(i => filter === "all" ? true : i.status === filter);
@@ -134,16 +147,25 @@ export default function Invoices() {
 
                     {stats.defaulters.length > 0 && (
                         <div className="bg-white border border-brand-line rounded-sm p-5" data-testid="invoice-defaulters">
-                            <div className="flex items-center gap-2 mb-4">
-                                <WarningOctagon size={18} className="text-brand-action" weight="duotone" />
-                                <h3 className="font-heading text-lg text-brand-ink tracking-tight">Defaulters ({stats.defaulters.length})</h3>
-                                <span className="text-xs text-brand-inkSoft">flats with unpaid invoices &gt; 3 months old</span>
+                            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                                <div className="flex items-center gap-2">
+                                    <WarningOctagon size={18} className="text-brand-action" weight="duotone" />
+                                    <h3 className="font-heading text-lg text-brand-ink tracking-tight">Defaulters ({stats.defaulters.length})</h3>
+                                    <span className="text-xs text-brand-inkSoft">flats with unpaid invoices &gt; 3 months old</span>
+                                </div>
+                                <Button
+                                    data-testid="remind-all-defaulters-btn"
+                                    onClick={remindAll}
+                                    className="rounded-full bg-brand-action hover:bg-brand-actionHover text-white text-xs h-8 px-4"
+                                >
+                                    <PaperPlaneTilt size={13} className="mr-1.5" /> Remind all
+                                </Button>
                             </div>
                             <div className="overflow-x-auto">
                                 <table className="w-full text-sm">
                                     <thead>
                                         <tr className="bg-brand-bg border-b border-brand-line text-left">
-                                            {["Flat", "Residents", "Unpaid", "Months pending", "Total due"].map(h => (
+                                            {["Flat", "Residents", "Unpaid", "Months pending", "Total due", ""].map(h => (
                                                 <th key={h} className="py-2 px-3 font-medium text-brand-inkSoft text-[10px] uppercase tracking-overline">{h}</th>
                                             ))}
                                         </tr>
@@ -159,6 +181,17 @@ export default function Invoices() {
                                                 <td className="py-2 px-3 text-brand-inkSoft">{d.unpaid_count}</td>
                                                 <td className="py-2 px-3"><Chip variant="danger">{d.months_pending}mo</Chip></td>
                                                 <td className="py-2 px-3 font-heading text-brand-ink">{inr(d.amount)}</td>
+                                                <td className="py-2 px-3 text-right">
+                                                    <button
+                                                        data-testid={`remind-defaulter-${d.flat_id}`}
+                                                        onClick={() => remindOne(d)}
+                                                        disabled={d.residents.length === 0}
+                                                        title={d.residents.length === 0 ? "No resident linked to this flat" : "Send reminder email"}
+                                                        className="inline-flex items-center gap-1 text-xs font-medium text-brand-action hover:underline disabled:text-brand-inkSoft disabled:no-underline disabled:cursor-not-allowed"
+                                                    >
+                                                        <PaperPlaneTilt size={12} /> Remind
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ))}
                                     </tbody>
