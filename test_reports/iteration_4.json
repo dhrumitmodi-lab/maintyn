@@ -1,0 +1,53 @@
+{
+  "summary": "Monthly community digest feature tested end-to-end. Backend: 9/9 pytest cases pass covering preview, send, idempotency, runs list and RBAC (admin vs resident 403), plus scheduler startup log verification. Frontend: admin sees 'Monthly digest' button (digest-open-btn) on /app/announcements, opening it renders digest-preview with June 2026 label, 0% collection bar, Resolved/Upcoming/Notices tiles and Recent sends list. Send button triggers /admin/digest/send and shows 'already sent' toast on subsequent calls (idempotent for the already-sent month). Non-admins do not see the digest-open-btn.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/admin/digest/preview", "issue": "Uses HTTP POST semantics for a read-only preview; could be GET for cache-ability and semantic clarity."},
+      {"endpoint": "send_monthly_digest", "issue": "When dry_run=True on preview call, ALL users are still fetched even though not iterated — minor N+1 avoidance opportunity; also digest_html is not rendered in preview so payload matches API but visual preview cannot be inspected server-side."},
+      {"endpoint": "send_monthly_digest", "issue": "Idempotency skip returns {skipped:true, month, ...payload}. Response payload no longer contains sent_count/total_users on skip, which frontend does not need but is inconsistent with non-skipped response shape."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Digest dialog", "issues": ["DialogContent missing aria-describedby (existing app-wide a11y warning; non-blocking).", "Uses window.confirm() for send confirmation — consider Shadcn AlertDialog for consistency with rest of app.", "Preview shows only 3 tiles (Resolved/Upcoming/Notices); pending amount / expenses total from payload are hidden in UI though present in email HTML."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_digest.py",
+    "/app/test_reports/pytest/digest_results.xml"
+  ],
+  "action_items": [
+    "Optional: expose pending / expenses total tiles in digest preview UI so admins see the full email at a glance.",
+    "Optional: swap window.confirm for AlertDialog to match rest of app UX.",
+    "Optional: add aria-describedby to digest DialogContent."
+  ],
+  "critical_code_review_comments": [
+    "APScheduler starts inside FastAPI @app.on_event('startup') without a lock — if multiple workers were ever spun up (they are not today), each would fire the cron. Consider guarding via db-lock or single-worker deploy note.",
+    "send_monthly_digest sends emails sequentially in a for loop (await inside loop). For >100 residents this becomes slow and can block Resend rate limits. Consider asyncio.gather with concurrency limit or BackgroundTasks.",
+    "digest_runs insert happens AFTER all sends; if the loop crashes mid-way, the month is never marked sent and next call will re-send to already-emailed users. Consider try/finally to persist even on partial failure.",
+    "Idempotency key is just 'month' (YYYY-MM); resend for a specific month cannot be forced by an admin without deleting the digest_runs doc — no admin 'force resend' flag exposed.",
+    "_digest_html uses user['name'].split()[0] — will KeyError if a user lacks 'name' (older seed users). Add .get('name','Resident')."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_digest.py (new)"
+  ],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% (all data-testids resolve; preview + idempotent send flow verified)"},
+  "test_credentials": "admin@maintyn.app / Admin@12345",
+  "seed_data_creation": "Test resident user test_res_digest_<ts>@example.com registered by module fixture; no cleanup (kept minimal).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Digest for the current 'last month' (June 2026 as of Jul 21 2026) is already sent and stored in db.digest_runs. To retest a fresh send path, delete the corresponding digest_runs doc. Preview (dry_run=True) is always fresh and can be re-run indefinitely. Note pydantic email validator rejects .test TLD; use example.com for test emails.",
+  "verified_features": [
+    "POST /api/admin/digest/preview returns all required fields (label, month_start/end, collection_pct, invoices_paid/unpaid/total, collected, pending, expenses_total, resolved_complaints, open_complaints, upcoming_bookings[], notices[]) and does NOT create a digest_run.",
+    "POST /api/admin/digest/send returns {skipped, month, sent_count, total_users, ...payload} on first send and {skipped:true, month, ...payload} on subsequent same-month calls.",
+    "GET /api/admin/digest/runs returns array sorted desc by sent_at with {month,label,sent_at,sent_count,total_users}; no _id leaked.",
+    "Resident cannot call any /api/admin/digest/* endpoint — all return 403.",
+    "Backend log contains 'Monthly digest scheduler started (cron: day=1 hour=9)' on startup.",
+    "Frontend admin /app/announcements shows digest-open-btn; dialog renders digest-preview with June 2026 label, 0% collection bar, Resolved/Upcoming/Notices tiles and 'Recent sends' list (June 2026 — sent to 20/20).",
+    "digest-send-btn shows 'already sent' toast when the month has been sent (idempotency verified via UI).",
+    "digest-open-btn is not rendered when user is not admin (verified via unauthenticated /app/announcements — button absent)."
+  ]
+}

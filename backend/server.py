@@ -15,9 +15,11 @@ import bcrypt
 import jwt
 import httpx
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as _date
 from typing import Optional, List
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Form, Header, Query, BackgroundTasks
 from fastapi.responses import Response as FastAPIResponse
 from starlette.middleware.cors import CORSMiddleware
@@ -1033,6 +1035,196 @@ async def cancel_booking(bid: str, background: BackgroundTasks, user: dict = Dep
     return doc
 
 # ---------- Dashboard stats ----------
+# ---------- Monthly Digest ----------
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November", "December"]
+
+def _month_range(anchor: _date):
+    """Given any date in the target month, return (start_iso, end_iso, next_start_iso)."""
+    start = anchor.replace(day=1)
+    if start.month == 12:
+        next_start = start.replace(year=start.year + 1, month=1)
+    else:
+        next_start = start.replace(month=start.month + 1)
+    return start.isoformat(), (next_start - timedelta(days=1)).isoformat(), next_start.isoformat()
+
+async def _compute_digest_payload(target_month_anchor: _date) -> dict:
+    """Build the shared numbers for a given month (uses month of target_month_anchor)."""
+    start_iso, end_iso, next_start_iso = _month_range(target_month_anchor)
+    label = f"{MONTH_NAMES[target_month_anchor.month - 1]} {target_month_anchor.year}"
+
+    # Invoices with created_at within month
+    inv_paid_count = 0
+    inv_unpaid_count = 0
+    collected = 0.0
+    pending = 0.0
+    async for inv in db.invoices.find({"created_at": {"$gte": start_iso, "$lt": next_start_iso}}):
+        if inv["status"] == "paid":
+            inv_paid_count += 1
+            collected += float(inv["amount"])
+        else:
+            inv_unpaid_count += 1
+            pending += float(inv["amount"])
+    total_invoices = inv_paid_count + inv_unpaid_count
+    collection_pct = int(round((inv_paid_count / total_invoices) * 100)) if total_invoices else 0
+
+    # Complaints resolved this month (resolved_at falls in month)
+    resolved_count = 0
+    async for c in db.complaints.find({"status": "resolved", "resolved_at": {"$gte": start_iso, "$lt": next_start_iso}}):
+        resolved_count += 1
+    open_now = await db.complaints.count_documents({"status": {"$in": ["open", "in_progress"]}})
+
+    # Expenses in month
+    expenses_total = 0.0
+    async for e in db.expenses.find({"date": {"$gte": start_iso, "$lt": next_start_iso}}):
+        expenses_total += float(e["amount"])
+
+    # Upcoming bookings (from tomorrow, next 30 days)
+    today_iso = _date.today().isoformat()
+    horizon = (_date.today() + timedelta(days=30)).isoformat()
+    upcoming = await db.bookings.find(
+        {"date": {"$gte": today_iso, "$lte": horizon}, "status": {"$ne": "cancelled"}},
+        {"_id": 0}
+    ).sort([("date", 1), ("start_time", 1)]).limit(5).to_list(5)
+
+    # Notices posted in month
+    notices = await db.announcements.find(
+        {"created_at": {"$gte": start_iso, "$lt": next_start_iso}},
+        {"_id": 0}
+    ).sort("created_at", -1).limit(5).to_list(5)
+
+    return {
+        "label": label,
+        "month_start": start_iso,
+        "month_end": end_iso,
+        "collection_pct": collection_pct,
+        "invoices_paid": inv_paid_count,
+        "invoices_unpaid": inv_unpaid_count,
+        "total_invoices": total_invoices,
+        "collected": collected,
+        "pending": pending,
+        "expenses_total": expenses_total,
+        "resolved_complaints": resolved_count,
+        "open_complaints": open_now,
+        "upcoming_bookings": upcoming,
+        "notices": notices,
+    }
+
+def _digest_html(user: dict, p: dict) -> str:
+    inr = lambda n: f"₹{n:,.0f}"
+    bar = f"""
+      <div style="background:#F6F4F1;border-radius:999px;height:10px;overflow:hidden;margin:8px 0 4px">
+        <div style="background:#C85A3C;height:10px;width:{p['collection_pct']}%"></div>
+      </div>
+      <p style="font-size:12px;color:#576B61;margin:0">{p['invoices_paid']} of {p['total_invoices']} invoices paid</p>
+    """
+    upcoming_html = ""
+    if p["upcoming_bookings"]:
+        rows = "".join(
+            f"<tr><td style='padding:6px 0;border-bottom:1px solid #E2DFD8'>"
+            f"<b>{b.get('amenity_name','—')}</b><br>"
+            f"<span style='color:#576B61;font-size:12px'>{b['date']} · {b['start_time']}–{b['end_time']} · {b.get('user_name','')}</span>"
+            f"</td></tr>"
+            for b in p["upcoming_bookings"]
+        )
+        upcoming_html = f"<h3 style='margin:24px 0 8px;font-size:16px'>Coming up</h3><table width='100%' cellpadding='0' cellspacing='0'>{rows}</table>"
+    notices_html = ""
+    if p["notices"]:
+        items = "".join(
+            f"<li style='margin:6px 0'><b>{n['title']}</b> "
+            f"<span style='color:#576B61;font-size:12px'>· {n.get('category','general')}</span></li>"
+            for n in p["notices"]
+        )
+        notices_html = f"<h3 style='margin:24px 0 8px;font-size:16px'>Notices this month</h3><ul style='padding-left:18px;margin:0'>{items}</ul>"
+
+    personal = ""
+    if user.get("role") == "resident" and user.get("flat_id"):
+        my_unpaid = 0
+        # simple count (approx) — the caller precomputes if needed
+        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {user['name'].split()[0]}, here's a snapshot of your community this month.</p>"
+    else:
+        personal = f"<p style='margin:12px 0;color:#1B3127'>Hi {user['name'].split()[0]}, here's how the community did this month.</p>"
+
+    body = f"""
+      {personal}
+      <h3 style="margin:24px 0 8px;font-size:16px">Where we stand</h3>
+      <p style="margin:0"><b style="font-size:22px">{p['collection_pct']}%</b> collection · <b>{inr(p['collected'])}</b> collected</p>
+      {bar}
+      <p style="font-size:13px;color:#576B61;margin-top:6px">
+        {inr(p['pending'])} pending · {inr(p['expenses_total'])} spent
+      </p>
+
+      <h3 style="margin:24px 0 8px;font-size:16px">You resolved {p['resolved_complaints']} complaint{'s' if p['resolved_complaints']!=1 else ''}</h3>
+      <p style="margin:0;color:#576B61;font-size:14px">{p['open_complaints']} still open — sign in to help.</p>
+
+      {upcoming_html}
+      {notices_html}
+    """
+    return _email_frame(f"{p['label']} digest", body, f"{FRONTEND_URL}/app", "Open dashboard")
+
+async def send_monthly_digest(target_month_anchor: Optional[_date] = None, dry_run: bool = False) -> dict:
+    """Compute digest for the previous month and email every user.
+    If target_month_anchor is None, uses last month.
+    """
+    if target_month_anchor is None:
+        first_of_this_month = _date.today().replace(day=1)
+        target_month_anchor = first_of_this_month - timedelta(days=1)  # any date in previous month
+
+    payload = await _compute_digest_payload(target_month_anchor)
+    month_key = payload["month_start"][:7]  # YYYY-MM
+
+    # Idempotency check
+    existing = await db.digest_runs.find_one({"month": month_key})
+    if existing and not dry_run:
+        logger.info(f"Digest for {month_key} already sent on {existing.get('sent_at')} to {existing.get('sent_count')} users")
+        return {"skipped": True, "month": month_key, **payload}
+
+    users = await db.users.find({}, {"password_hash": 0}).to_list(5000)
+    sent = 0
+    if not dry_run:
+        for u in users:
+            html = _digest_html(u, payload)
+            try:
+                await send_email_raw(u["email"], f"maintyn · {payload['label']} digest", html)
+                sent += 1
+            except Exception as e:
+                logger.error(f"digest send failed for {u.get('email')}: {e}")
+        await db.digest_runs.insert_one({
+            "month": month_key,
+            "label": payload["label"],
+            "sent_at": now_iso(),
+            "sent_count": sent,
+            "total_users": len(users),
+        })
+    return {"skipped": False, "sent_count": sent, "total_users": len(users), "month": month_key, **payload}
+
+# APScheduler runs on 1st of every month at 09:00 UTC
+scheduler = AsyncIOScheduler(timezone="UTC")
+
+async def _scheduled_digest():
+    try:
+        result = await send_monthly_digest()
+        logger.info(f"Scheduled digest: {result.get('sent_count', 0)}/{result.get('total_users', 0)} sent for {result.get('month')}")
+    except Exception as e:
+        logger.exception(f"Scheduled digest failed: {e}")
+
+@api.post("/admin/digest/preview")
+async def digest_preview(_: dict = Depends(require_admin)):
+    """Preview last month's digest payload without sending."""
+    result = await send_monthly_digest(dry_run=True)
+    return result
+
+@api.post("/admin/digest/send")
+async def digest_send_now(_: dict = Depends(require_admin)):
+    """Send last month's digest immediately. Idempotent per YYYY-MM."""
+    result = await send_monthly_digest(dry_run=False)
+    return result
+
+@api.get("/admin/digest/runs")
+async def digest_runs(_: dict = Depends(require_admin)):
+    docs = await db.digest_runs.find({}, {"_id": 0}).sort("sent_at", -1).to_list(50)
+    return docs
+
 @api.get("/stats")
 async def stats(user: dict = Depends(get_current_user)):
     total_flats = await db.flats.count_documents({})
@@ -1115,6 +1307,7 @@ async def startup():
     await db.bookings.create_index("id", unique=True)
     await db.bookings.create_index([("amenity_id", 1), ("date", 1)])
     await db.bookings.create_index("user_id")
+    await db.digest_runs.create_index("month", unique=True)
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()
@@ -1137,8 +1330,22 @@ async def startup():
 
     init_storage()
 
+    # Schedule monthly digest — 1st of each month at 09:00 UTC
+    if not scheduler.running:
+        scheduler.add_job(
+            _scheduled_digest,
+            CronTrigger(day=1, hour=9, minute=0),
+            id="monthly_digest",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        scheduler.start()
+        logger.info("Monthly digest scheduler started (cron: day=1 hour=9)")
+
 @app.on_event("shutdown")
 async def shutdown():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
     client.close()
 
 # Include router & CORS
