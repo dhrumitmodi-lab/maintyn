@@ -56,6 +56,13 @@ Society Facility Management app for both committee members and residents. Commit
   - Flats grouped into per-block sections
 - **Complaint UX**: complainer sees a "You'll be notified by email on status changes" banner + a prominent status chip on every card. Email notification on status change already wired.
 
+### 2026-02-21 (Iteration 6)
+- **Role-scoped Flats access**: `/app/flats` restricted to admin/committee (Protected route). Sidebar hides `nav-flats` and `nav-users` for residents.
+- **My Flat page** (`/app/my-flat`, residents only): flat header, StatCards (Residents / Connections / Bills / Pending), utility grid (Electricity, Piped Gas, Water, Internet, DTH), utility bills table.
+- **Utility connections**: per flat, per utility type — store provider name + customer id + optional meter number. CRUD via `POST /api/flats/{id}/utility-connections`, `PATCH/DELETE /api/utility-connections/{id}`.
+- **Utility bills**: track electricity / gas / water etc. per flat. `POST /api/utility-bills` (inherits provider+customer from connection if given), `POST /api/utility-bills/{id}/pay`, `DELETE /api/utility-bills/{id}`. Residents auto-scoped to own flat.
+- Helper `_can_access_flat` centralises "admin/committee always, resident only own flat".
+
 ## Prioritized Backlog
 ### P1 (Next iteration)
 - Payment gateway (Stripe / Razorpay)
