@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 6: Verified My Flat + Utility Connections + Utility Bills feature. Backend: 12/12 pytest cases pass covering /api/my-flat (resident+admin+unauth), /api/flats/{id}/utility-connections (RBAC list, cross-flat 403, invalid utility_type 400, create/patch/delete), /api/utility-bills (resident auto-scope, admin filter, create-with-connection-inherit provider+customer, pay, delete, invalid utility_type 400). Frontend: Resident sidebar correctly shows nav-my-flat only (nav-flats and nav-users hidden). Direct navigation to /app/flats as resident redirects to /app dashboard. /app/my-flat renders Flat header (A-101, Floor 1, owner-occupied), 4 StatCards (Residents=3, Connections=1, Bills tracked=1, Pending=0), and 5 utility cards (electricity, piped_gas, water, internet, dth) plus 'Other' hidden by design. Existing seeded BESCOM electricity connection + paid electricity bill are visible. Add-connection dialog (add-connection-piped_gas) creates a new connection and refreshes the grid. Log utility bill (add-utility-bill-btn) creates a bill that appears in the utility-bills table with pay-utility-bill-<id> and delete-utility-bill-<id> controls. pay-utility-bill toggles status to paid and removes the pay button. Admin sidebar correctly hides nav-my-flat and shows nav-flats + nav-users. All data-testids resolve. Test data cleaned up.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "MyFlat dialogs (Add connection / Log utility bill)", "issues": ["Radix DialogContent missing Description/aria-describedby - React console warnings on every open. Existing app-wide a11y issue, non-blocking."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_my_flat_utilities.py",
+    "/app/test_reports/pytest/it6_results.xml"
+  ],
+  "action_items": [
+    "Optional a11y polish: add DialogDescription (or aria-describedby={undefined} suppress) to MyFlat connection & bill dialogs to silence Radix warning.",
+    "Optional: on MyFlat, the 6th 'other' utility is not rendered in the grid (only 5 shown). If 'other' is intended to be selectable, expose a card or ensure user can still create via bill dialog only. Current behavior matches spec (5 cards)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1634 lines — well past 700-line guideline. Split utility endpoints into /app/backend/routers/utilities.py.",
+    "PATCH /api/utility-connections uses the same UtilityConnectionIn model as POST, forcing all fields on partial update. Consider a separate UtilityConnectionPatch with optional fields for true PATCH semantics.",
+    "GET /api/utility-bills has no pagination (limit 500 hard-coded via .to_list(500)). Add page/limit for large societies.",
+    "Bill 'status' field values are inconsistent across app ('paid' vs boolean 'paid'). Standardize on one representation.",
+    "_can_access_flat treats admin+committee as always-allowed which is correct, but resident check is by user['flat_id'] == flat_id — residents with multiple flats (co-owners) are not modeled. Note for future."
+  ],
+  "updated_files": ["/app/backend/tests/test_my_flat_utilities.py (new)"],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all data-testids resolve; RBAC + CRUD flows verified)"},
+  "test_credentials": "admin@maintyn.app / Admin@12345 ; demo.resident@example.com / Resident@123",
+  "seed_data_creation": "Backend tests create/delete TEST_ prefixed connections and bills within each test (self-cleaning). Frontend test created and deleted one piped_gas connection 'TEST_UI_GAS' + one bill amount=555 for flat A-101. Existing seed data (BESCOM electricity conn + paid bill) left intact.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Utility endpoints live under /api/my-flat, /api/flats/{fid}/utility-connections, /api/utility-connections/{id}, /api/utility-bills, /api/utility-bills/{id}/pay. RBAC helper _can_access_flat(user, flat_id) allows admin/committee always and resident only when user.flat_id == flat_id. Frontend page: /app/frontend/src/pages/MyFlat.jsx. Sidebar RBAC in Layout.jsx uses roles arrays — 'resident' sees nav-my-flat, admin/committee see nav-flats+nav-users. /app/flats route wrapped by <Protected roles={['admin','committee']}> in App.js. Demo resident has flat_id set to A-101 and a pre-seeded electricity connection (BESCOM/ABC12345/M-778) plus one paid electricity bill."
+}

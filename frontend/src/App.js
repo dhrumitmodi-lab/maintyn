@@ -19,6 +19,7 @@ import Announcements from "@/pages/Announcements";
 import Visitors from "@/pages/Visitors";
 import Amenities from "@/pages/Amenities";
 import Directory from "@/pages/Directory";
+import MyFlat from "@/pages/MyFlat";
 import "@/App.css";
 
 function Protected({ children, roles }) {
@@ -53,7 +54,8 @@ function App() {
                             <Route index element={<Dashboard />} />
                             <Route path="users" element={<Protected roles={["admin", "committee"]}><Users /></Protected>} />
                             <Route path="directory" element={<Directory />} />
-                            <Route path="flats" element={<Flats />} />
+                            <Route path="flats" element={<Protected roles={["admin", "committee"]}><Flats /></Protected>} />
+                            <Route path="my-flat" element={<MyFlat />} />
                             <Route path="invoices" element={<Invoices />} />
                             <Route path="expenses" element={<Expenses />} />
                             <Route path="complaints" element={<Complaints />} />

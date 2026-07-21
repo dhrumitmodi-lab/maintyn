@@ -270,6 +270,31 @@ class SocietyIn(BaseModel):
     contact_email: Optional[EmailStr] = None
     contact_phone: Optional[str] = None
 
+UTILITY_TYPES = ("electricity", "piped_gas", "water", "internet", "dth", "other")
+
+class UtilityConnectionIn(BaseModel):
+    utility_type: str
+    provider_name: str = Field(min_length=1)
+    customer_id: str = Field(min_length=1)
+    meter_number: Optional[str] = None
+    notes: Optional[str] = None
+
+class UtilityBillIn(BaseModel):
+    flat_id: Optional[str] = None
+    utility_type: str
+    connection_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    customer_id: Optional[str] = None
+    amount: float
+    bill_period: str
+    due_date: str
+    notes: Optional[str] = None
+    receipt_file_id: Optional[str] = None
+
+class UtilityBillPay(BaseModel):
+    method: Optional[str] = "manual"
+    note: Optional[str] = None
+
 class AmenityIn(BaseModel):
     name: str
     description: Optional[str] = None
@@ -654,6 +679,157 @@ async def import_flats_csv(file: UploadFile = File(...), _: dict = Depends(requi
     return {"created": created, "skipped": skipped, "errors": errors}
 
 # ---------- Invoices ----------
+# ---------- Utility Connections & Bills ----------
+def _can_access_flat(user: dict, flat_id: str) -> bool:
+    if user["role"] in ("admin", "committee"):
+        return True
+    return user.get("flat_id") == flat_id
+
+async def _enrich_bill(b: dict):
+    if b.get("flat_id"):
+        f = await db.flats.find_one({"id": b["flat_id"]}, {"_id": 0})
+        b["flat"] = f
+    return b
+
+@api.get("/my-flat")
+async def my_flat(user: dict = Depends(get_current_user)):
+    if not user.get("flat_id"):
+        return {"flat": None, "residents": [], "connections": [], "recent_bills": []}
+    flat = await db.flats.find_one({"id": user["flat_id"]}, {"_id": 0})
+    residents = await db.users.find({"flat_id": user["flat_id"]}, {"password_hash": 0, "_id": 0}).to_list(50)
+    connections = await db.utility_connections.find({"flat_id": user["flat_id"]}, {"_id": 0}).sort("utility_type", 1).to_list(50)
+    bills = await db.utility_bills.find({"flat_id": user["flat_id"]}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
+    return {"flat": flat, "residents": residents, "connections": connections, "recent_bills": bills}
+
+@api.get("/flats/{fid}/utility-connections")
+async def list_utility_connections(fid: str, user: dict = Depends(get_current_user)):
+    if not _can_access_flat(user, fid):
+        raise HTTPException(403, "Not your flat")
+    docs = await db.utility_connections.find({"flat_id": fid}, {"_id": 0}).sort("utility_type", 1).to_list(50)
+    return docs
+
+@api.post("/flats/{fid}/utility-connections")
+async def create_utility_connection(fid: str, data: UtilityConnectionIn, user: dict = Depends(get_current_user)):
+    if not _can_access_flat(user, fid):
+        raise HTTPException(403, "Not your flat")
+    if data.utility_type not in UTILITY_TYPES:
+        raise HTTPException(400, f"Invalid utility_type. Allowed: {', '.join(UTILITY_TYPES)}")
+    if not await db.flats.find_one({"id": fid}):
+        raise HTTPException(404, "Flat not found")
+    doc = {
+        "id": new_id(),
+        "flat_id": fid,
+        **data.model_dump(),
+        "created_by": user["id"],
+        "created_at": now_iso(),
+    }
+    await db.utility_connections.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.patch("/utility-connections/{cid}")
+async def update_utility_connection(cid: str, data: UtilityConnectionIn, user: dict = Depends(get_current_user)):
+    conn = await db.utility_connections.find_one({"id": cid})
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    if not _can_access_flat(user, conn["flat_id"]):
+        raise HTTPException(403, "Not your flat")
+    if data.utility_type not in UTILITY_TYPES:
+        raise HTTPException(400, f"Invalid utility_type")
+    await db.utility_connections.update_one({"id": cid}, {"$set": data.model_dump()})
+    return await db.utility_connections.find_one({"id": cid}, {"_id": 0})
+
+@api.delete("/utility-connections/{cid}")
+async def delete_utility_connection(cid: str, user: dict = Depends(get_current_user)):
+    conn = await db.utility_connections.find_one({"id": cid})
+    if not conn:
+        raise HTTPException(404, "Connection not found")
+    if not _can_access_flat(user, conn["flat_id"]):
+        raise HTTPException(403, "Not your flat")
+    await db.utility_connections.delete_one({"id": cid})
+    return {"ok": True}
+
+@api.get("/utility-bills")
+async def list_utility_bills(user: dict = Depends(get_current_user), flat_id: Optional[str] = None, status: Optional[str] = None):
+    q = {}
+    if user["role"] == "resident":
+        if not user.get("flat_id"):
+            return []
+        q["flat_id"] = user["flat_id"]
+    elif flat_id:
+        q["flat_id"] = flat_id
+    if status in ("paid", "unpaid"):
+        q["status"] = status
+    docs = await db.utility_bills.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    for d in docs:
+        await _enrich_bill(d)
+    return docs
+
+@api.post("/utility-bills")
+async def create_utility_bill(data: UtilityBillIn, user: dict = Depends(get_current_user)):
+    flat_id = data.flat_id or user.get("flat_id")
+    if not flat_id:
+        raise HTTPException(400, "flat_id is required")
+    if not _can_access_flat(user, flat_id):
+        raise HTTPException(403, "Not your flat")
+    if data.utility_type not in UTILITY_TYPES:
+        raise HTTPException(400, "Invalid utility_type")
+    provider_name = data.provider_name
+    customer_id = data.customer_id
+    if data.connection_id:
+        conn = await db.utility_connections.find_one({"id": data.connection_id})
+        if conn:
+            provider_name = provider_name or conn["provider_name"]
+            customer_id = customer_id or conn["customer_id"]
+    bill = {
+        "id": new_id(),
+        "flat_id": flat_id,
+        "utility_type": data.utility_type,
+        "connection_id": data.connection_id,
+        "provider_name": provider_name or "",
+        "customer_id": customer_id or "",
+        "amount": float(data.amount),
+        "bill_period": data.bill_period,
+        "due_date": data.due_date,
+        "notes": data.notes,
+        "receipt_file_id": data.receipt_file_id,
+        "status": "unpaid",
+        "paid_at": None,
+        "payment_method": None,
+        "payment_note": None,
+        "created_by": user["id"],
+        "created_at": now_iso(),
+    }
+    await db.utility_bills.insert_one(bill)
+    bill.pop("_id", None)
+    return bill
+
+@api.post("/utility-bills/{bid}/pay")
+async def pay_utility_bill(bid: str, data: UtilityBillPay, user: dict = Depends(get_current_user)):
+    bill = await db.utility_bills.find_one({"id": bid})
+    if not bill:
+        raise HTTPException(404, "Bill not found")
+    if not _can_access_flat(user, bill["flat_id"]):
+        raise HTTPException(403, "Not your flat")
+    await db.utility_bills.update_one({"id": bid}, {"$set": {
+        "status": "paid",
+        "paid_at": now_iso(),
+        "payment_method": data.method,
+        "payment_note": data.note,
+    }})
+    return await db.utility_bills.find_one({"id": bid}, {"_id": 0})
+
+@api.delete("/utility-bills/{bid}")
+async def delete_utility_bill(bid: str, user: dict = Depends(get_current_user)):
+    bill = await db.utility_bills.find_one({"id": bid})
+    if not bill:
+        raise HTTPException(404, "Bill not found")
+    if not _can_access_flat(user, bill["flat_id"]):
+        raise HTTPException(403, "Not your flat")
+    await db.utility_bills.delete_one({"id": bid})
+    return {"ok": True}
+
+
 async def _notify_invoice_created(flat_id: str, amount: float, description: str, month: str, due_date: str):
     residents = await db.users.find({"flat_id": flat_id}, {"password_hash": 0}).to_list(50)
     if not residents:
@@ -1403,6 +1579,10 @@ async def startup():
     await db.bookings.create_index([("amenity_id", 1), ("date", 1)])
     await db.bookings.create_index("user_id")
     await db.digest_runs.create_index("month", unique=True)
+    await db.utility_connections.create_index("id", unique=True)
+    await db.utility_connections.create_index("flat_id")
+    await db.utility_bills.create_index("id", unique=True)
+    await db.utility_bills.create_index("flat_id")
 
     # Seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@maintyn.app").lower()

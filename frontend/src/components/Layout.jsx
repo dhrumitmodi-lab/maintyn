@@ -5,14 +5,15 @@ import { useSociety } from "@/context/SocietyContext";
 import SocietySettingsDialog from "@/components/SocietySettingsDialog";
 import {
     House, Users as UsersIcon, Buildings, Receipt, CurrencyInr,
-    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti, AddressBook, Gear
+    ChatCircleDots, Megaphone, IdentificationBadge, SignOut, List, Confetti, AddressBook, Gear, HouseLine
 } from "@phosphor-icons/react";
 import Logo from "@/components/Logo";
 import { Button } from "@/components/ui/button";
 
 const NAV = [
     { to: "/app", label: "Overview", icon: House, roles: ["admin", "committee", "resident"], end: true, testId: "nav-overview" },
-    { to: "/app/flats", label: "Flats", icon: Buildings, roles: ["admin", "committee", "resident"], testId: "nav-flats" },
+    { to: "/app/my-flat", label: "My flat", icon: HouseLine, roles: ["resident"], testId: "nav-my-flat" },
+    { to: "/app/flats", label: "Flats", icon: Buildings, roles: ["admin", "committee"], testId: "nav-flats" },
     { to: "/app/users", label: "Residents", icon: UsersIcon, roles: ["admin", "committee"], testId: "nav-users" },
     { to: "/app/directory", label: "Directory", icon: AddressBook, roles: ["admin", "committee", "resident"], testId: "nav-directory" },
     { to: "/app/invoices", label: "Invoices", icon: Receipt, roles: ["admin", "committee", "resident"], testId: "nav-invoices" },
