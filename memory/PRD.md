@@ -120,6 +120,11 @@ Society Facility Management app for both committee members and residents. Commit
 - Removed `MASTER_DB_NAME` from `.env` (no longer used).
 - Regression: 145/147 backend pytest passing (18/18 for the new multi-tenant prefix tests). 2 pre-existing failures unrelated (password reset restore + master `/me` behaviour).
 
+### 2026-07-22 (Iteration 14 · Deployment blocker cleanup)
+- **Dropped 8 legacy physical MongoDB databases** from preview (`maintyn_master` + six `maintyn_society_*` + one stray `s_a23b56b9…`) — data was already migrated into `maintyn_db` on iteration 13, these were dead weight the Atlas deployer kept trying to mirror. Preview mongo now shows only `maintyn_db`.
+- **Bounded queries**: converted the remaining 5 `async for db.<coll>.find(...)` patterns to `.to_list(N)` (staff enrichment, defaulter residents, flats residents, `_flat_label_map`/`_flat_map` helpers, `_has_conflict` booking overlap check). Deployment agent's `unoptimized_queries_detected` flag flipped to false.
+- Smoke suite: **9/9 pass** (`tests/test_iter14_smoke.py`). Full regression: 168/172; 4 pre-existing failures unrelated.
+
 ## Notes
 - **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
 - **Multi-society setup**: fully done via master console — no need for separate deployments.
