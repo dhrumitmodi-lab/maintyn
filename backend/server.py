@@ -1931,9 +1931,22 @@ async def send_monthly_digest(target_month_anchor: Optional[_date] = None, dry_r
 scheduler = AsyncIOScheduler(timezone="UTC")
 
 async def _scheduled_digest():
+    """Run the monthly digest for every active society, one tenant at a time."""
     try:
-        result = await send_monthly_digest()
-        logger.info(f"Scheduled digest: {result.get('sent_count', 0)}/{result.get('total_users', 0)} sent for {result.get('month')}")
+        active = await master_db.societies.find({"status": "active"}).to_list(500)
+        total_sent = 0
+        for soc in active:
+            token = _current_db.set(_get_society_db(soc["id"]))
+            try:
+                r = await send_monthly_digest()
+                total_sent += int(r.get("sent_count", 0))
+                logger.info(f"Scheduled digest · society {soc['id'][:8]} ({soc.get('name')}): "
+                            f"{r.get('sent_count', 0)}/{r.get('total_users', 0)} sent for {r.get('month')}")
+            except Exception as e:
+                logger.exception(f"digest failed for society {soc.get('id')}: {e}")
+            finally:
+                _current_db.reset(token)
+        logger.info(f"Scheduled digest complete: {total_sent} emails across {len(active)} societies")
     except Exception as e:
         logger.exception(f"Scheduled digest failed: {e}")
 

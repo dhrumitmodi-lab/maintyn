@@ -110,6 +110,16 @@ Society Facility Management app for both committee members and residents. Commit
 - **InvoiceView & Invoices page**: extra "Late fee" column on table; "Total ₹X" hint below status when unpaid+penalty; InvoiceView line-item includes `Late-payment fee` row + Total label switches to `Total due` / `Total paid`.
 - Backend regression: 13/13 pytest passing (`tests/test_penalty.py`).
 
+### 2026-07-22 (Iteration 13 · Deployment fix — single-DB tenancy)
+- **Problem**: Emergent Atlas deployer rejected the multi-tenant DB layout — one physical `maintyn_society_<uuid>` DB per society ran into `INVALID_DATABASE_NAME` when creating a single Atlas user across N DBs.
+- **Fix**: Consolidated the entire app into ONE physical database (`DB_NAME`). Master collections live unprefixed (`societies`, `master_users`, `user_index`, `master_settings`); tenant collections are prefix-namespaced as `s_<society_id_hex>__<coll>`.
+- **`_TenantView` class** replaces `client[<tenant_db>]` — all existing `db.<coll>.find(...)` code keeps working unchanged.
+- **`_drop_society_data(sid)`** replaces `client.drop_database(...)` in the delete-society flow — drops all `s_<hex>__*` collections in one pass.
+- **`_migrate_legacy_databases_if_present`** startup hook (idempotent via `master_settings.legacy_migration` marker): auto-migrates data from the old separate-DB layout (`maintyn_master` + `maintyn_society_*`) into the new consolidated layout. No-op on fresh Atlas.
+- **Scheduler fix**: `_scheduled_digest` now iterates every active society and runs `send_monthly_digest` under each tenant's context — previously it hit the raw fallback DB.
+- Removed `MASTER_DB_NAME` from `.env` (no longer used).
+- Regression: 145/147 backend pytest passing (18/18 for the new multi-tenant prefix tests). 2 pre-existing failures unrelated (password reset restore + master `/me` behaviour).
+
 ## Notes
 - **Master super-admin**: `master@maintyn.in` / `Master@12345` (seeded at startup)
 - **Multi-society setup**: fully done via master console — no need for separate deployments.
