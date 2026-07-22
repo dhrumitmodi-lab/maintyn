@@ -50,14 +50,22 @@ def admin_session():
 
 @pytest.fixture(scope="module")
 def default_society_db():
-    """Return the Motor db handle for the default society (multi-tenant)."""
+    """Return a tenant-prefixed view on the shared DB (collection-prefix-per-tenant)."""
+    class _PrefixView:
+        def __init__(self, db, prefix):
+            self._db = db; self._prefix = prefix
+        def __getattr__(self, name):
+            return self._db[f"{self._prefix}{name}"]
+        def __getitem__(self, name):
+            return self._db[f"{self._prefix}{name}"]
+
     async def _resolve():
         client = AsyncIOMotorClient(MONGO_URL)
-        master = client[os.environ.get("MASTER_DB_NAME", "maintyn_master")]
-        soc = await master.societies.find_one({"is_default": True})
+        shared = client[os.environ.get("DB_NAME", "maintyn_db")]
+        soc = await shared.societies.find_one({"is_default": True})
         assert soc, "no default society found"
-        sdb_name = f"maintyn_society_{soc['id'].replace('-', '')}"
-        return client, client[sdb_name]
+        prefix = f"s_{soc['id'].replace('-', '')}__"
+        return client, _PrefixView(shared, prefix)
 
     client, sdb = asyncio.get_event_loop().run_until_complete(_resolve())
     yield sdb

@@ -1,0 +1,38 @@
+{
+  "summary": "Verified the database-per-tenant → collection-prefix-per-tenant architecture switch. New pytest suite /app/backend/tests/test_multitenant_prefix.py (18 tests, all PASS) covers: master session/list/rollup, Default society regression (flats/users/invoices/complaints/expenses/staff/invoice-stats — all non-empty and penalty-enriched), society lifecycle (POST /api/master/societies writes prefixed collections `s_<hex>__*` in the shared `maintyn_db` and does NOT create any new physical DB; new admin can log in; new-society flat is invisible to Default society), delete lifecycle (DELETE /api/master/societies/{id} drops all `s_<hex>__*` collections + user_index + society doc, Default remains intact with 33 flats and 175 invoices), and layout sanity (shared DB has societies/master_users/user_index + tenant `s_<hex>__*` collections; exactly 1 is_default society). Direct-mongo check confirmed the six pre-existing legacy `maintyn_society_<uuid>` physical DBs are dormant leftovers; new writes only touch `maintyn_db`. Broader regression: after fixing two test fixtures that referenced legacy paths (test_penalty.py + test_m416_followup.py), the entire suite is 145 passed / 2 failed (147 tests). Remaining 2 failures are pre-existing and unrelated to this task: (1) TestPasswordReset::test_reset_password_valid_then_login_then_restore, (2) test_master_multitenant.py::test_master_auth_me_401_ignored (test expects /api/auth/me to return 401 for master token, but it now returns 200 with master identity — behavior change in auth, not DB layout).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/me", "issue": "Returns 200 with master identity when called with a master token (test_master_multitenant.py expects 401/403). Unrelated to this iteration's DB migration but should be triaged — either the endpoint should reject master tokens or the test expectation should be updated."},
+      {"endpoint": "/api/auth/reset-password", "issue": "test_reset_password_valid_then_login_then_restore in backend_test.py fails (pre-existing). Not investigated deeply — flag for future iteration."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_multitenant_prefix.py",
+    "/app/test_reports/pytest/iter13_multitenant.xml"
+  ],
+  "action_items": [
+    "Consider deleting the six legacy physical DBs (maintyn_master, maintyn_society_*) from preview mongo — they are dead data (~24MB) and only kept for rollback safety. There is also one stray physical DB `s_a23b56b9ec1e472e9b9817d54933de6e` (empty/near-empty) from an earlier attempt — safe to drop.",
+    "Top-level un-prefixed collections still exist in maintyn_db (flats, invoices, users, complaints, expenses, society, staff, etc.) from the migration snapshot. They are not being written to by the new prefixed code (verified: default prefix invoices=175 vs top-level invoices=8), but they consume ~space and could confuse a future engineer. Recommend a cleanup migration.",
+    "Decide whether /api/auth/me should 401 for master tokens (as the older test_master_multitenant test expects) or officially return master identity — then align the test."
+  ],
+  "critical_code_review_comments": [
+    "server.py _drop_society_data iterates list_collection_names() and drops any starting with the prefix — correct and safe. Consider also removing the society doc + user_index inside the same function for atomicity (currently done in the caller).",
+    "list_societies loops N societies × 3 count queries each — for 100+ societies this becomes 300+ round-trips. Consider a single aggregation.",
+    "create_society calls sdb.<coll>.create_index for 14 collections synchronously — for a create-society burst this is ~14 index-create RPCs. Acceptable for now, could be parallelised with asyncio.gather.",
+    "_migrate_legacy_databases_if_present uses a `master_settings.key='legacy_migration'` sentinel — good for idempotency. Confirmed by direct mongo that this ran once and won't re-run.",
+    "Top-level un-prefixed collections in maintyn_db (flats, invoices, users, complaints, expenses, society, staff, utility_bills, utility_connections, visitors, files, announcements, amenities, bookings, digest_runs, password_reset_tokens) appear to be residue from a migration or an earlier code path. Verify nothing writes there and add a one-shot cleanup."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_multitenant_prefix.py (NEW — 18 tests, all pass)",
+    "/app/backend/tests/test_penalty.py (fixed default_society_db fixture to use shared DB + collection prefix; was pointing at legacy maintyn_society_<hex> physical DB)",
+    "/app/backend/tests/test_m416_followup.py (updated backdate-invoice mongo scan to look at prefixed collections in shared DB before falling back to legacy physical DBs)"
+  ],
+  "success_rate": {"backend": "98.6% (145/147 including regression; 18/18 for the new architecture-specific tests)", "frontend": "n/a — testing_type was backend only"},
+  "test_credentials": "admin@maintyn.app / Admin@12345 ; master@maintyn.in / Master@12345 ; demo.resident@example.com / Resident@123",
+  "seed_data_creation": "During test run: 1 temporary society (name TEST_PrefixSoc_<tag>) + 1 flat inside it were created and then DELETED as part of the lifecycle test. A cleanup fixture (test_zzz_cleanup) sweeps any leftover TEST_* societies + prefixed collections. Final DB state: 1 default society, no test residue.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New authoritative regression file for the multi-tenant architecture change is /app/backend/tests/test_multitenant_prefix.py. Run with: `pytest backend/tests/test_multitenant_prefix.py -o 'addopts=' -v`. It reads MONGO_URL/DB_NAME from /app/backend/.env and REACT_APP_BACKEND_URL from /app/frontend/.env, hits the preview URL for API and localhost mongo directly for layout inspection. Tenant collection naming convention is `s_<society_id_no_dashes>__<coll>` in the shared `maintyn_db`. Legacy physical DBs (maintyn_master, maintyn_society_*) are dormant — do not write to them. Two pre-existing failing tests (password-reset restore + master-token /api/auth/me) are known and NOT caused by this iteration."
+}

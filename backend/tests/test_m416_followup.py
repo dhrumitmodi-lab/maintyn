@@ -275,9 +275,17 @@ from dotenv import load_dotenv
 load_dotenv('/app/backend/.env')
 async def run():
     c = AsyncIOMotorClient(os.environ['MONGO_URL'])
-    # find db containing the invoice
+    shared = c[os.environ.get('DB_NAME', 'maintyn_db')]
+    # New layout: prefixed collections in the shared DB
+    for coll_name in await shared.list_collection_names():
+        if coll_name.endswith('__invoices') or coll_name == 'invoices':
+            res = await shared[coll_name].update_one({{'id': '{inv["id"]}'}}, {{'$set': {{'created_at': '{old_iso}'}}}})
+            if res.matched_count:
+                print('BACKDATED', coll_name)
+                return
+    # Legacy layout fallback (old physical DBs)
     for name in await c.list_database_names():
-        if name.startswith('maintyn_society_') or name == os.environ.get('DB_NAME'):
+        if name.startswith('maintyn_society_'):
             db = c[name]
             res = await db.invoices.update_one({{'id': '{inv["id"]}'}}, {{'$set': {{'created_at': '{old_iso}'}}}})
             if res.matched_count:
