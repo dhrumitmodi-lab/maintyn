@@ -44,7 +44,8 @@ def _mount(app_module):
         staff_ids = list({d["assigned_to"] for d in docs if d.get("assigned_to")})
         staff_map = {}
         if staff_ids:
-            async for s in db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0}):
+            staff_docs = await db.staff.find({"id": {"$in": staff_ids}}, {"_id": 0}).to_list(500)
+            for s in staff_docs:
                 staff_map[s["id"]] = {
                     "id": s["id"], "name": s["name"], "role_label": s.get("role_label"),
                     "phone": s.get("phone"), "email": s.get("email"), "vendor_org": s.get("vendor_org"),

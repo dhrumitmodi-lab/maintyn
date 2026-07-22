@@ -83,7 +83,8 @@ def _mount(app_module):
         flats_map = await _flat_map(defaulter_flat_ids)
         residents_by_flat = {}
         if defaulter_flat_ids:
-            async for r in db.users.find({"flat_id": {"$in": defaulter_flat_ids}}, {"password_hash": 0, "_id": 0}):
+            residents = await db.users.find({"flat_id": {"$in": defaulter_flat_ids}}, {"password_hash": 0, "_id": 0}).to_list(5000)
+            for r in residents:
                 residents_by_flat.setdefault(r["flat_id"], []).append(
                     {"id": r["id"], "name": r["name"], "email": r["email"], "phone": r.get("phone")}
                 )

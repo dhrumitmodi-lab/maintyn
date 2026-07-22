@@ -592,20 +592,16 @@ async def _flat_label_map(flat_ids: list) -> dict:
     ids = [fid for fid in flat_ids if fid]
     if not ids:
         return {}
-    out = {}
-    async for f in db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}):
-        out[f["id"]] = f"{f['block']}-{f['number']}"
-    return out
+    docs = await db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}).to_list(5000)
+    return {f["id"]: f"{f['block']}-{f['number']}" for f in docs}
 
 async def _flat_map(flat_ids: list) -> dict:
     """Batch fetch flats by id and return {flat_id: flat_doc}."""
     ids = [fid for fid in flat_ids if fid]
     if not ids:
         return {}
-    out = {}
-    async for f in db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}):
-        out[f["id"]] = f
-    return out
+    docs = await db.flats.find({"id": {"$in": list(set(ids))}}, {"_id": 0}).to_list(5000)
+    return {f["id"]: f for f in docs}
 
 @api.get("/directory")
 async def directory(_: dict = Depends(get_current_user)):
@@ -984,7 +980,8 @@ async def list_flats(user: dict = Depends(get_current_user)):
     # Batch fetch all residents in one query
     residents_by_flat = {}
     if flat_ids:
-        async for r in db.users.find({"flat_id": {"$in": flat_ids}}, {"password_hash": 0, "_id": 0}):
+        residents = await db.users.find({"flat_id": {"$in": flat_ids}}, {"password_hash": 0, "_id": 0}).to_list(5000)
+        for r in residents:
             residents_by_flat.setdefault(r["flat_id"], []).append(r)
     for f in docs:
         f["residents"] = residents_by_flat.get(f["id"], [])
@@ -1580,7 +1577,8 @@ async def _has_conflict(amenity_id: str, date: str, start_m: int, end_m: int, ex
     q = {"amenity_id": amenity_id, "date": date, "status": {"$ne": "cancelled"}}
     if exclude_id:
         q["id"] = {"$ne": exclude_id}
-    async for b in db.bookings.find(q):
+    same_day = await db.bookings.find(q).to_list(500)
+    for b in same_day:
         b_start = _parse_hm(b["start_time"])
         b_end = _parse_hm(b["end_time"])
         # overlap if start < b_end AND end > b_start
