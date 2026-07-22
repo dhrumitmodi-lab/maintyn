@@ -29,7 +29,6 @@ from pydantic import BaseModel, EmailStr, Field
 # ---------- Config ----------
 MONGO_URL = os.environ['MONGO_URL']
 DB_NAME = os.environ['DB_NAME']
-MASTER_DB_NAME = os.environ.get('MASTER_DB_NAME', 'maintyn_master')
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALGORITHM = "HS256"
 EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
@@ -41,29 +40,81 @@ EMAIL_FROM_NAME = os.environ.get('EMAIL_FROM_NAME', 'maintyn')
 FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
 
 client = AsyncIOMotorClient(MONGO_URL)
-master_db = client[MASTER_DB_NAME]
+# Single physical database — deployment-friendly (one Atlas DB, one user).
+# Master collections live unprefixed (societies, master_users, user_index, ...)
+# Tenant collections are collection-name-prefixed per society ("s_<hex>__users").
+_shared_db = client[DB_NAME]
+master_db = _shared_db
 
-# Per-request tenant DB via ContextVar; existing code uses `db.<collection>` transparently.
+# Per-request tenant "database" via ContextVar; existing code uses `db.<collection>` transparently.
 from contextvars import ContextVar
 _current_db: ContextVar = ContextVar("current_db", default=None)
 
-def _db_name_for_society(society_id: str) -> str:
-    return f"maintyn_society_{society_id.replace('-', '')}"
 
-def _get_society_db(society_id: str):
-    return client[_db_name_for_society(society_id)]
+def _tenant_prefix_for(society_id: str) -> str:
+    return f"s_{society_id.replace('-', '')}__"
+
+
+class _TenantView:
+    """Acts like a Motor `Database` but namespaces every collection lookup so
+    all tenant data lives inside the single physical `DB_NAME` database.
+    Supports both `view.users` and `view["users"]` access patterns.
+    """
+    __slots__ = ("_prefix", "society_id")
+
+    def __init__(self, society_id: str):
+        self.society_id = society_id
+        self._prefix = _tenant_prefix_for(society_id)
+
+    def __getattr__(self, name):
+        # For non-collection attributes like `.list_collection_names` etc.,
+        # fall through to the underlying shared db.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return _shared_db[f"{self._prefix}{name}"]
+
+    def __getitem__(self, name):
+        return _shared_db[f"{self._prefix}{name}"]
+
+
+def _db_name_for_society(society_id: str) -> str:
+    # Kept for backwards compatibility with existing callers that persisted
+    # `db_name` on society records. Now returns a logical namespace tag.
+    return _tenant_prefix_for(society_id).rstrip("_")
+
+
+def _get_society_db(society_id: str) -> _TenantView:
+    return _TenantView(society_id)
+
+
+async def _drop_society_data(society_id: str):
+    """Delete every collection under a society's prefix within the shared DB."""
+    prefix = _tenant_prefix_for(society_id)
+    names = await _shared_db.list_collection_names()
+    for n in names:
+        if n.startswith(prefix):
+            try:
+                await _shared_db[n].drop()
+            except Exception as e:
+                logger.warning(f"Failed to drop collection {n}: {e}")
+
 
 class _DBProxy:
-    """Transparent proxy to the current-tenant Motor db held in a ContextVar.
-    Falls back to the legacy DB_NAME db when no context is set (startup, workers)."""
-    _fallback = client[DB_NAME]
+    """Transparent proxy to the current-tenant view held in a ContextVar.
+    Falls back to raw shared-DB access (unprefixed collections) when no
+    context is set (startup / background workers). Both branches support
+    `db.<collection>` and `db["<collection>"]`.
+    """
     def _target(self):
         d = _current_db.get()
-        return d if d is not None else self._fallback
+        return d if d is not None else _shared_db
+
     def __getattr__(self, name):
-        return getattr(self._target(), name)
+        return self._target()[name]
+
     def __getitem__(self, name):
         return self._target()[name]
+
 
 db = _DBProxy()
 
@@ -750,7 +801,7 @@ async def delete_society(sid: str, _: dict = Depends(require_super_admin)):
         raise HTTPException(404, "Society not found")
     if soc.get("is_default"):
         raise HTTPException(400, "Cannot delete the Default society")
-    await client.drop_database(_db_name_for_society(sid))
+    await _drop_society_data(sid)
     await master_db.user_index.delete_many({"society_id": sid})
     await master_db.societies.delete_one({"id": sid})
     return {"ok": True}
@@ -1973,8 +2024,110 @@ async def stats(user: dict = Depends(get_current_user)):
     }
 
 # ---------- Startup ----------
+async def _migrate_legacy_databases_if_present():
+    """Consolidate data from the old physical-DB-per-tenant layout into the
+    single shared `DB_NAME` database using collection prefixes.
+
+    Old layout:
+      - `maintyn_master` (or whatever MASTER_DB_NAME env used to be) with master collections
+      - `maintyn_society_<uuid>` with each tenant's collections
+
+    New layout (all inside `DB_NAME`):
+      - master collections: societies, master_users, user_index, master_settings, ...
+      - tenant collections: `s_<uuid_hex>__<coll>`
+
+    Idempotent — checks a marker document in `master_settings.legacy_migration`.
+    """
+    marker = None
+    try:
+        marker = await _shared_db.master_settings.find_one({"key": "legacy_migration"})
+    except Exception:
+        marker = None
+    if marker and marker.get("done"):
+        return
+
+    try:
+        all_db_names = await client.list_database_names()
+    except Exception as e:
+        logger.warning(f"legacy migration skipped — cannot list databases: {e}")
+        return
+
+    legacy_master_name = os.environ.get("MASTER_DB_NAME", "maintyn_master")
+    legacy_society_names = [n for n in all_db_names if n.startswith("maintyn_society_")]
+    migrated_any = False
+
+    # 1) Master collections from legacy_master → _shared_db (no prefix)
+    if legacy_master_name != DB_NAME and legacy_master_name in all_db_names:
+        try:
+            src = client[legacy_master_name]
+            for coll_name in await src.list_collection_names():
+                dst = _shared_db[coll_name]
+                count = 0
+                async for doc in src[coll_name].find({}):
+                    doc.pop("_id", None)
+                    try:
+                        await dst.insert_one(doc)
+                        count += 1
+                    except Exception:
+                        pass  # duplicate keys → already migrated
+                if count:
+                    migrated_any = True
+                    logger.info(f"[legacy-migrate] master.{coll_name}: {count} docs")
+        except Exception as e:
+            logger.warning(f"legacy master migration failed: {e}")
+
+    # 2) Each legacy society DB → prefixed collections in _shared_db
+    for legacy_db_name in legacy_society_names:
+        try:
+            # Extract the hex portion after the "maintyn_society_" prefix
+            hex_id = legacy_db_name[len("maintyn_society_"):]
+            prefix = f"s_{hex_id}__"
+            src = client[legacy_db_name]
+            for coll_name in await src.list_collection_names():
+                dst = _shared_db[f"{prefix}{coll_name}"]
+                count = 0
+                async for doc in src[coll_name].find({}):
+                    doc.pop("_id", None)
+                    try:
+                        await dst.insert_one(doc)
+                        count += 1
+                    except Exception:
+                        pass
+                if count:
+                    migrated_any = True
+                    logger.info(f"[legacy-migrate] {legacy_db_name}.{coll_name} → {prefix}{coll_name}: {count} docs")
+        except Exception as e:
+            logger.warning(f"legacy society {legacy_db_name} migration failed: {e}")
+
+    # 3) Legacy single-tenant DB_NAME (pre-multi-tenant era): copy all its
+    # collections into a Default society prefix ONLY when there is no society
+    # data yet. This preserves pre-master-DB deployments.
+    # (We skip this branch here — the existing default-society creation block
+    #  in `startup()` handles that path when master_db.societies is empty.)
+
+    # Persist completion marker (also runs when nothing was migrated so we don't retry endlessly)
+    try:
+        await _shared_db.master_settings.update_one(
+            {"key": "legacy_migration"},
+            {"$set": {"key": "legacy_migration", "done": True, "at": now_iso(), "migrated_any": migrated_any}},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning(f"could not write legacy_migration marker: {e}")
+
+    if migrated_any:
+        logger.info("Legacy DB consolidation complete.")
+
+
 @app.on_event("startup")
 async def startup():
+    # One-time legacy migration: consolidate any separate physical tenant DBs
+    # from the old architecture into the single DB_NAME (with prefixes).
+    # Idempotent — no-op when there's nothing to migrate.
+    await _migrate_legacy_databases_if_present()
+
+    # Master collections indexes
+
     # Master DB indexes
     await master_db.master_users.create_index("email", unique=True)
     await master_db.master_users.create_index("id", unique=True)
@@ -1993,40 +2146,20 @@ async def startup():
         })
         logger.info(f"Seeded master super-admin: {master_email}")
 
-    # Ensure a Default society exists, wrapping the legacy DB_NAME data (idempotent)
+    # Ensure a Default society exists (idempotent). Prefer any migrated
+    # is_default=True society over creating a new one.
     default_soc = await master_db.societies.find_one({"is_default": True})
     if not default_soc:
+        # Also honour a legacy single-society deployment: if any societies exist,
+        # promote the oldest to default rather than creating a duplicate.
+        any_soc = await master_db.societies.find_one({}, sort=[("created_at", 1)])
+        if any_soc:
+            await master_db.societies.update_one({"id": any_soc["id"]}, {"$set": {"is_default": True}})
+            default_soc = await master_db.societies.find_one({"id": any_soc["id"]})
+            logger.info(f"Promoted existing society {any_soc['id']} to Default")
+    if not default_soc:
         default_id = new_id()
-        legacy_db_name = os.environ["DB_NAME"]
-        target_db_name = _db_name_for_society(default_id)
-        # Move legacy data by renaming (drop target if exists, then rename)
-        try:
-            existing_collections = await client[legacy_db_name].list_collection_names()
-        except Exception:
-            existing_collections = []
-        default_db_name = target_db_name
-        if existing_collections:
-            # Copy each collection into the new society DB (avoid renameCollection privileges)
-            src_db = client[legacy_db_name]
-            dst_db = client[target_db_name]
-            for coll_name in existing_collections:
-                src = src_db[coll_name]
-                dst = dst_db[coll_name]
-                async for doc in src.find({}):
-                    doc.pop("_id", None)
-                    try:
-                        await dst.insert_one(doc)
-                    except Exception:
-                        pass
-        # Rebuild user_index from the new society's users
-        sdb = client[default_db_name]
-        async for u in sdb.users.find({}, {"email": 1, "id": 1}):
-            try:
-                await master_db.user_index.insert_one({
-                    "email": u["email"], "user_id": u["id"], "society_id": default_id, "kind": "society"
-                })
-            except Exception:
-                pass
+        default_db_name = _db_name_for_society(default_id)
         await master_db.societies.insert_one({
             "id": default_id,
             "name": os.environ.get("DEFAULT_SOCIETY_NAME", "Default Society"),
@@ -2037,7 +2170,7 @@ async def startup():
             "first_admin_name": "Admin",
             "created_at": now_iso(),
         })
-        logger.info(f"Migrated legacy data into Default society ({default_id})")
+        logger.info(f"Created Default society ({default_id})")
         default_soc = await master_db.societies.find_one({"is_default": True})
 
     # Seed default society admin (into the Default society DB)
